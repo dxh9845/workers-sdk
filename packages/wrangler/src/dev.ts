@@ -308,7 +308,6 @@ export const dev = createCommand({
 				"--live-reload is only supported in local mode. Please just use one of either --remote or --live-reload."
 			);
 		}
-
 		if (isWebContainer()) {
 			logger.error(
 				`Oh no! 😟 You tried to run \`wrangler dev\` in a StackBlitz WebContainer. 🤯

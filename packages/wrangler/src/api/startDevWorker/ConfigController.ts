@@ -297,7 +297,7 @@ async function resolveConfig(
 
 	const nodejsCompatMode = unwrapHook(input.build?.nodejsCompatMode, config);
 
-	const { bindings, unsafe } = await resolveBindings(config, input);
+	const { bindings, unsafe } = await resolveBindings(config, input); // TODO: dherzig This is where bindings are resolved
 
 	const assetsOptions = getAssetsOptions(
 		{
