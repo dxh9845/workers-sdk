@@ -1,6 +1,6 @@
 import { BuildContext, BuildOptions, Plugin, context } from 'esbuild'
-import path from 'path';
-import fs from 'fs/promises';
+import path, { join } from 'path';
+import fs from 'node:fs/promises'
 
 /**
  * `workerd` `extensions` don't have access to "built-in" modules like
@@ -26,7 +26,7 @@ type EmbedWorkersOptions = {
      * will be bundled
      */
     workersRootDir: string,
-    outBase?: string,
+    workerOutputDir: string,
     writeMetafiles: boolean,
 }
 
@@ -35,7 +35,7 @@ type EmbedWorkersOptions = {
  * and bundle them into the final output.
  */
 export const embedWorkersPlugin: (options: EmbedWorkersOptions) => Plugin = ({
-    outBase,
+    workerOutputDir,
     workersRootDir,
     writeMetafiles = true,
 }) => {
@@ -53,6 +53,7 @@ export const embedWorkersPlugin: (options: EmbedWorkersOptions) => Plugin = ({
                 // Use `build.resolve()` API so Workers can be written as `m?[jt]s` files
                 const result = await build.resolve("./" + name, {
                     kind: "import-statement",
+                    // Resolve relative to the directory containing the Workers
                     resolveDir: workersRootDir,
                 });
                 if (result.errors.length > 0) return { errors: result.errors };
@@ -72,18 +73,20 @@ export const embedWorkersPlugin: (options: EmbedWorkersOptions) => Plugin = ({
                         metafile: writeMetafiles,
                         entryPoints: [args.path],
                         minifySyntax: true,
-                        outdir: build.initialOptions.outdir,
-                        outbase: outBase,
+                        outdir: workerOutputDir,
                         plugins: [rewriteNodeToInternalPlugin],
                     });
                 }
+
                 const metafile = (await builder.rebuild()).metafile;
                 workersBuilders.set(args.path, builder);
                 if (writeMetafiles) {
-                    await fs.mkdir("worker-metafiles", { recursive: true });
+                    const metadir = join(workerOutputDir ?? '.', 'worker-metafiles')
+                    console.log(metadir)
+                    await fs.mkdir(metadir, { recursive: true });
                     await fs.writeFile(
                         path.join(
-                            "worker-metafiles",
+                            metadir,
                             path.basename(args.path) + ".metafile.json"
                         ),
                         JSON.stringify(metafile)
@@ -104,6 +107,7 @@ export const embedWorkersPlugin: (options: EmbedWorkersOptions) => Plugin = ({
          return contents;
       }
       `;
+                builder.dispose()
                 return { contents, loader: "js" };
             });
         },

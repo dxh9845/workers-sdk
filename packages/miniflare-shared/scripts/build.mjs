@@ -9,7 +9,7 @@ async function buildPackage() {
 	/** @type {esbuild.BuildOptions} */
 	const buildOptions = {
 		platform: "node",
-		format: "esm",
+		format: "cjs",
 		target: "esnext",
 		bundle: true,
 		sourcemap: true,
