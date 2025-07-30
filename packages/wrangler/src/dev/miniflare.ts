@@ -1,6 +1,6 @@
 import assert from "node:assert";
 import { randomUUID } from "node:crypto";
-import path, { resolve } from "node:path";
+import path from "node:path";
 import { getDevContainerImageName } from "@cloudflare/containers-shared";
 import { CoreHeaders, HttpOptions_Style, Log, LogLevel } from "miniflare";
 import {
@@ -1425,7 +1425,7 @@ export async function buildMiniflareOptions(
 					pluginName: dev.plugin,
 					// Resolve the module relative to the worker project (meaning it must be installed and accessible in the node_modules
 					// relative to this path)
-					resolveWorkingDirectory: resolve(
+					resolveWorkingDirectory: path.resolve(
 						config.bundle.entry.projectRoot,
 						"package.json"
 					),
