@@ -107,11 +107,11 @@ export async function convertToConfigBundle(
 		workerDefinitions: event.config.dev?.registry,
 		legacyAssetPaths: event.config.legacy?.site?.bucket
 			? {
-					baseDirectory: event.config.legacy?.site?.bucket,
-					assetDirectory: "",
-					excludePatterns: event.config.legacy?.site?.exclude ?? [],
-					includePatterns: event.config.legacy?.site?.include ?? [],
-				}
+				baseDirectory: event.config.legacy?.site?.bucket,
+				assetDirectory: "",
+				excludePatterns: event.config.legacy?.site?.exclude ?? [],
+				includePatterns: event.config.legacy?.site?.include ?? [],
+			}
 			: undefined,
 		assets: event.config?.assets,
 		initialPort: undefined,
@@ -119,13 +119,13 @@ export async function convertToConfigBundle(
 		rules: [],
 		...(event.config.dev.inspector === false
 			? {
-					inspect: false,
-					inspectorPort: undefined,
-				}
+				inspect: false,
+				inspectorPort: undefined,
+			}
 			: {
-					inspect: true,
-					inspectorPort: 0,
-				}),
+				inspect: true,
+				inspectorPort: 0,
+			}),
 		localPersistencePath: event.config.dev.persist,
 		liveReload: event.config.dev?.liveReload ?? false,
 		crons,
@@ -287,13 +287,13 @@ export class LocalRuntimeController extends RuntimeController {
 					},
 					...(userWorkerInspectorUrl
 						? {
-								userWorkerInspectorUrl: {
-									protocol: userWorkerInspectorUrl.protocol,
-									hostname: userWorkerInspectorUrl.hostname,
-									port: userWorkerInspectorUrl.port,
-									pathname: `/core:user:${getName(data.config)}`,
-								},
-							}
+							userWorkerInspectorUrl: {
+								protocol: userWorkerInspectorUrl.protocol,
+								hostname: userWorkerInspectorUrl.hostname,
+								port: userWorkerInspectorUrl.port,
+								pathname: `/core:user:${getName(data.config)}`,
+							},
+						}
 						: {}),
 					userWorkerInnerUrlOverrides: {
 						protocol: data.config?.dev?.origin?.secure ? "https:" : "http:",

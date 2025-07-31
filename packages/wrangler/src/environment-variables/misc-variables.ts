@@ -281,3 +281,10 @@ export const getDockerHost = getEnvironmentVariableFactory({
 			: "unix:///var/run/docker.sock";
 	},
 });
+
+/**
+ * `WRANGLER_EXTERNAL_PLUGINS` specifies plugins to use that are external from Miniflare. It's an array of package names.
+ */
+export const getExternalPlugins = getEnvironmentVariableFactory({
+	variableName: "WRANGLER_EXTERNAL_PLUGINS",
+});
