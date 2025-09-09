@@ -1,6 +1,6 @@
 {
 	"name": "wrangler",
-	"version": "4.27.0",
+	"version": "4.35.0",
 	"description": "Command-line interface for all things Cloudflare Workers",
 	"keywords": [
 		"wrangler",
@@ -57,7 +57,7 @@
 		"clean": "rimraf wrangler-dist miniflare-dist emitted-types",
 		"dev": "pnpm run clean && concurrently -c black,blue --kill-others-on-fail false \"pnpm tsup --watch src --watch ../containers-shared/src\" \"pnpm run check:type --watch --preserveWatchOutput\"",
 		"generate-json-schema": "node -r esbuild-register scripts/generate-json-schema.ts",
-		"start": "pnpm run bundle && cross-env NODE_OPTIONS=--enable-source-maps ./bin/wrangler.js",
+		"start": "pnpm run build && cross-env NODE_OPTIONS=--enable-source-maps ./bin/wrangler.js",
 		"test": "dotenv -- pnpm run assert-git-version && dotenv -- vitest",
 		"test:ci": "pnpm run test run",
 		"test:debug": "pnpm run test --silent=false --verbose=true",
@@ -72,19 +72,20 @@
 		"esbuild": "catalog:default",
 		"miniflare": "workspace:*",
 		"path-to-regexp": "6.3.0",
-		"unenv": "2.0.0-rc.19",
-		"workerd": "1.20250730.0"
+		"unenv": "2.0.0-rc.21",
+		"workerd": "1.20250906.0"
 	},
 	"devDependencies": {
 		"@aws-sdk/client-s3": "^3.721.0",
 		"@cloudflare/cli": "workspace:*",
 		"@cloudflare/containers-shared": "workspace:*",
 		"@cloudflare/eslint-config-worker": "workspace:*",
+		"@cloudflare/jsrpc": "link:../../vendor/jsrpc",
 		"@cloudflare/pages-shared": "workspace:^",
 		"@cloudflare/types": "6.18.4",
 		"@cloudflare/workers-shared": "workspace:*",
 		"@cloudflare/workers-tsconfig": "workspace:*",
-		"@cloudflare/workers-types": "^4.20250730.0",
+		"@cloudflare/workers-types": "catalog:default",
 		"@cspotcode/source-map-support": "0.8.1",
 		"@iarna/toml": "^3.0.0",
 		"@sentry/node": "^7.86.0",
@@ -160,7 +161,7 @@
 		"yargs": "^17.7.2"
 	},
 	"peerDependencies": {
-		"@cloudflare/workers-types": "^4.20250730.0"
+		"@cloudflare/workers-types": "catalog:default"
 	},
 	"peerDependenciesMeta": {
 		"@cloudflare/workers-types": {

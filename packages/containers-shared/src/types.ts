@@ -1,11 +1,17 @@
-import type { InstanceType, SchedulingPolicy } from "./client";
+import type {
+	ApplicationAffinityColocation,
+	InstanceType,
+	SchedulingPolicy,
+} from "./client";
+import type { ApplicationAffinityHardwareGeneration } from "./client/models/ApplicationAffinityHardwareGeneration";
 
 export interface Logger {
-	debug: (message: string) => void;
-	log: (message: string) => void;
-	info: (message: string) => void;
-	warn: (message: string) => void;
-	error: (error: Error) => void;
+	debug: (...args: unknown[]) => void;
+	debugWithSanitization: (label: string, ...args: unknown[]) => void;
+	log: (...args: unknown[]) => void;
+	info: (...args: unknown[]) => void;
+	warn: (...args: unknown[]) => void;
+	error: (...args: unknown[]) => void;
 }
 
 export type BuildArgs = {
@@ -60,14 +66,19 @@ export type SharedContainerConfig = {
 	max_instances: number;
 	/** if undefined in config, defaults to "default" */
 	scheduling_policy: SchedulingPolicy;
-	/** if undefined in config, defaults to 25 */
-	rollout_step_percentage: number;
+	/** if undefined in config, defaults to [90, 10] */
+	rollout_step_percentage: number | number[];
 	/** if undefined in config, defaults to "full_auto" */
 	rollout_kind: "full_auto" | "full_manual" | "none";
+	rollout_active_grace_period: number;
 	constraints: {
 		regions?: string[];
 		cities?: string[];
-		tier: number;
+		tier: number | undefined;
+	};
+	affinities?: {
+		colocation?: ApplicationAffinityColocation;
+		hardware_generation?: ApplicationAffinityHardwareGeneration;
 	};
 	observability: { logs_enabled: boolean };
 } & InstanceTypeOrLimits;

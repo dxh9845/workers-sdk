@@ -1,22 +1,5 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 import assert from "node:assert";
-
-// List all the test functions.
-// The test can be executing by fetching the `/${testName}` url.
-export const TESTS: Record<string, () => void> = {
-	testCryptoGetRandomValues,
-	testImplementsBuffer,
-	testNodeCompatModules,
-	testUtilImplements,
-	testPath,
-	testDns,
-	testTimers,
-	testNet,
-	testTls,
-	testImportDebug,
-	testRequireDebug,
-	testHttp,
-	testHttps,
-};
 
 export default {
 	async fetch(request: Request): Promise<Response> {
@@ -40,7 +23,7 @@ export default {
 			default: {
 				// `/<test name>` executes the test or returns an html list of tests when not found
 				const testName = url.pathname.slice(1);
-				const test = TESTS[testName];
+				const test = WorkerdTests[testName];
 				if (!test) {
 					return generateTestListResponse(testName);
 				}
@@ -66,7 +49,7 @@ function generateTestListResponse(testName: string): Response {
 	return new Response(
 		`<h1>${testName ? `${testName} not found!` : `Pick a test to run`} </h1>
         <ul>
-        ${Object.keys(TESTS)
+        ${Object.keys(WorkerdTests)
 					.map((name) => `<li><a href="/${name}">${name}</a></li>`)
 					.join("")}
         </ul>`,
@@ -74,214 +57,452 @@ function generateTestListResponse(testName: string): Response {
 	);
 }
 
-async function testCryptoGetRandomValues() {
-	const crypto = await import("node:crypto");
+// Test functions executed on worked.
+// The test can be executing by fetching the `/${testName}` url.
+export const WorkerdTests: Record<string, () => void> = {
+	async testCryptoGetRandomValues() {
+		const crypto = await import("node:crypto");
 
-	const array = new Uint32Array(10);
-	crypto.getRandomValues(array);
-	assert.strictEqual(array.length, 10);
-	assert(array.every((v) => v >= 0 && v <= 0xff_ff_ff_ff));
-}
+		const array = new Uint32Array(10);
+		crypto.getRandomValues(array);
+		assert.strictEqual(array.length, 10);
+		assert(array.every((v) => v >= 0 && v <= 0xff_ff_ff_ff));
+	},
 
-async function testImplementsBuffer() {
-	const encoder = new TextEncoder();
-	const buffer = await import("node:buffer");
-	const Buffer = buffer.Buffer;
-	assert.strictEqual(buffer.isAscii(encoder.encode("hello world")), true);
-	assert.strictEqual(buffer.isUtf8(encoder.encode("Yağız")), true);
-	assert.strictEqual(buffer.btoa("hello"), "aGVsbG8=");
-	assert.strictEqual(buffer.atob("aGVsbG8="), "hello");
-	{
-		const dest = buffer.transcode(
-			Buffer.from([
-				0x74, 0x00, 0x1b, 0x01, 0x73, 0x00, 0x74, 0x00, 0x20, 0x00, 0x15, 0x26,
-			]),
-			"ucs2",
-			"utf8"
-		);
-		assert.strictEqual(
-			dest.toString(),
-			Buffer.from("těst ☕", "utf8").toString()
-		);
-	}
-	assert.ok(new buffer.File([], "file"));
-	assert.ok(new buffer.Blob([]));
-	assert.strictEqual(typeof buffer.INSPECT_MAX_BYTES, "number");
-	assert.strictEqual(typeof buffer.resolveObjectURL, "function");
-}
+	async testCrypto() {
+		const crypto = await import("node:crypto");
 
-async function testNodeCompatModules() {
-	const module = await import("node:module");
-	const require = module.createRequire("/");
-	const modules = [
-		"_tls_common",
-		"_tls_wrap",
-		"assert",
-		"assert/strict",
-		"buffer",
-		"diagnostics_channel",
-		"dns",
-		"dns/promises",
-		"events",
-		"net",
-		"path",
-		"path/posix",
-		"path/win32",
-		"querystring",
-		"stream",
-		"stream/consumers",
-		"stream/promises",
-		"stream/web",
-		"string_decoder",
-		"timers",
-		"timers/promises",
-		"url",
-		"util/types",
-		"zlib",
-	];
-	for (const m of modules) {
-		assert.strictEqual(await import(m), require(m));
-	}
-}
+		assert.strictEqual(typeof crypto.pseudoRandomBytes, "function");
 
-async function testUtilImplements() {
-	const util = await import("node:util");
-	const { types } = util;
-	assert.strictEqual(types.isExternal("hello world"), false);
-	assert.strictEqual(types.isAnyArrayBuffer(new ArrayBuffer(0)), true);
-	assert.strictEqual(util.isArray([]), true);
-	assert.strictEqual(util.isDeepStrictEqual(0, 0), true);
-}
+		const removeEolV22 = getRuntimeFlagValue("remove_nodejs_compat_eol_v22");
 
-async function testPath() {
-	const pathWin32 = await import("node:path/win32");
-	assert.strictEqual(pathWin32.sep, "\\");
-	assert.strictEqual(pathWin32.delimiter, ";");
-	const pathPosix = await import("node:path/posix");
-	assert.strictEqual(pathPosix.sep, "/");
-	assert.strictEqual(pathPosix.delimiter, ":");
-}
+		if (removeEolV22) {
+			assert.strictEqual(crypto.Cipher, undefined);
+			assert.strictEqual(crypto.Decipher, undefined);
+			assert.strictEqual(crypto.createCipher, undefined);
+			assert.strictEqual(crypto.createDecipher, undefined);
+		} else {
+			assert.strictEqual(typeof crypto.Cipher, "function");
+			assert.strictEqual(typeof crypto.Decipher, "function");
+			assert.strictEqual(typeof crypto.createCipher, "function");
+			assert.strictEqual(typeof crypto.createDecipher, "function");
+		}
+	},
 
-async function testDns() {
-	const dns = await import("node:dns");
-	await new Promise((resolve, reject) => {
-		dns.resolveTxt("nodejs.org", (error, results) => {
-			if (error) {
-				reject(error);
-				return;
-			}
-			assert.ok(Array.isArray(results[0]));
-			assert.strictEqual(results.length, 1);
-			assert.ok(results[0][0].startsWith("v=spf1"));
-			resolve(null);
+	async testImplementsBuffer() {
+		const encoder = new TextEncoder();
+		const buffer = await import("node:buffer");
+		const Buffer = buffer.Buffer;
+		assert.strictEqual(buffer.isAscii(encoder.encode("hello world")), true);
+		assert.strictEqual(buffer.isUtf8(encoder.encode("Yağız")), true);
+		assert.strictEqual(buffer.btoa("hello"), "aGVsbG8=");
+		assert.strictEqual(buffer.atob("aGVsbG8="), "hello");
+		{
+			const dest = buffer.transcode(
+				Buffer.from([
+					0x74, 0x00, 0x1b, 0x01, 0x73, 0x00, 0x74, 0x00, 0x20, 0x00, 0x15,
+					0x26,
+				]),
+				"ucs2",
+				"utf8"
+			);
+			assert.strictEqual(
+				dest.toString(),
+				Buffer.from("těst ☕", "utf8").toString()
+			);
+		}
+		assert.ok(new buffer.File([], "file"));
+		assert.ok(new buffer.Blob([]));
+		assert.strictEqual(typeof buffer.INSPECT_MAX_BYTES, "number");
+		assert.strictEqual(typeof buffer.resolveObjectURL, "function");
+	},
+
+	async testNodeCompatModules() {
+		const module = await import("node:module");
+		const require = module.createRequire("/");
+		const modules = [
+			"_tls_common",
+			"_tls_wrap",
+			"assert",
+			"assert/strict",
+			"async_hooks",
+			"buffer",
+			"constants",
+			"crypto",
+			"diagnostics_channel",
+			"dns",
+			"dns/promises",
+			"events",
+			"net",
+			"path",
+			"path/posix",
+			"path/win32",
+			"querystring",
+			"module",
+			"stream",
+			"stream/consumers",
+			"stream/promises",
+			"stream/web",
+			"string_decoder",
+			"sys",
+			"timers",
+			"timers/promises",
+			"url",
+			"util",
+			"util/types",
+			"zlib",
+		];
+		for (const m of modules) {
+			assert.strictEqual(await import(m), require(m));
+		}
+	},
+
+	async testUtilImplements() {
+		const util = await import("node:util");
+		const { types } = util;
+		assert.strictEqual(types.isExternal("hello world"), false);
+		assert.strictEqual(types.isAnyArrayBuffer(new ArrayBuffer(0)), true);
+		assert.strictEqual(util.isArray([]), true);
+		assert.strictEqual(util.isDeepStrictEqual(0, 0), true);
+
+		// @ts-expect-error `_errnoException` is not part of the public API
+		assert.strictEqual(typeof util._errnoException, "function");
+		// @ts-expect-error `_exceptionWithHostPort` is not part of the public API
+		assert.strictEqual(typeof util._exceptionWithHostPort, "function");
+
+		const removeEolV23 = getRuntimeFlagValue("remove_nodejs_compat_eol_v23");
+
+		if (removeEolV23) {
+			assert.strictEqual(util.isBoolean, undefined);
+			assert.strictEqual(util.isBuffer, undefined);
+			assert.strictEqual(util.isDate, undefined);
+			assert.strictEqual(util.isError, undefined);
+		} else {
+			assert.strictEqual(util.isBoolean(true), true);
+			assert.strictEqual(util.isBuffer(true), false);
+			assert.strictEqual(util.isBuffer(Buffer.from("hello world")), true);
+			assert.strictEqual(util.isDate(new Date()), true);
+			assert.strictEqual(util.isError(new Error()), true);
+			assert.strictEqual(util.isFunction(new Error()), false);
+			assert.strictEqual(util.isNull(null), true);
+			assert.strictEqual(util.isNullOrUndefined(null), true);
+			assert.strictEqual(util.isNumber(1), true);
+			assert.strictEqual(util.isObject({}), true);
+			assert.strictEqual(util.isPrimitive(true), true);
+			assert.strictEqual(util.isRegExp(true), false);
+			assert.strictEqual(util.isString(true), false);
+			assert.strictEqual(util.isSymbol(true), false);
+			assert.strictEqual(util.isUndefined(undefined), true);
+		}
+	},
+
+	async testPath() {
+		const pathWin32 = await import("node:path/win32");
+		assert.strictEqual(pathWin32.sep, "\\");
+		assert.strictEqual(pathWin32.delimiter, ";");
+		const pathPosix = await import("node:path/posix");
+		assert.strictEqual(pathPosix.sep, "/");
+		assert.strictEqual(pathPosix.delimiter, ":");
+	},
+
+	async testDns() {
+		const dns = await import("node:dns");
+		await new Promise((resolve, reject) => {
+			dns.resolveTxt("nodejs.org", (error, results) => {
+				if (error) {
+					reject(error);
+					return;
+				}
+				assert.ok(Array.isArray(results));
+				assert.ok(results.length >= 1);
+				let foundSpf = false;
+				for (const result of results) {
+					assert.ok(Array.isArray(result));
+					if (result.length >= 1) {
+						assert.strictEqual(typeof result[0], "string");
+						foundSpf ||= result[0].startsWith("v=spf1");
+					}
+				}
+				assert.ok(foundSpf);
+				resolve(null);
+			});
 		});
-	});
 
-	const dnsPromises = await import("node:dns/promises");
-	const results = await dnsPromises.resolveCaa("google.com");
-	assert.ok(Array.isArray(results));
-	assert.strictEqual(results.length, 1);
-	assert.strictEqual(typeof results[0].critical, "number");
-	assert.strictEqual(results[0].critical, 0);
-	assert.strictEqual(results[0].issue, "pki.goog");
-}
+		const dnsPromises = await import("node:dns/promises");
+		const results = await dnsPromises.resolveCaa("google.com");
+		assert.ok(Array.isArray(results));
+		assert.strictEqual(results.length, 1);
+		assert.strictEqual(typeof results[0].critical, "number");
+		assert.strictEqual(results[0].critical, 0);
+		assert.strictEqual(results[0].issue, "pki.goog");
+	},
 
-async function testTimers() {
-	const timers = await import("node:timers");
-	const timeout = timers.setTimeout(() => null, 1000);
-	// active is deprecated and no more in the type
-	(timers as unknown as { active: (t: NodeJS.Timeout) => void }).active(
-		timeout
-	);
-	timers.clearTimeout(timeout);
-
-	const timersPromises = await import("node:timers/promises");
-	assert.strictEqual(await timersPromises.setTimeout(1, "timeout"), "timeout");
-}
-
-export async function testNet() {
-	const net = await import("node:net");
-	assert.strictEqual(typeof net, "object");
-	assert.strictEqual(typeof net.createConnection, "function");
-	assert.throws(() => net.createServer(), /not implemented/);
-}
-
-export async function testTls() {
-	const tls = await import("node:tls");
-	assert.strictEqual(typeof tls, "object");
-	// @ts-expect-error Node types are wrong
-	assert.strictEqual(typeof tls.convertALPNProtocols, "function");
-}
-
-export async function testImportDebug() {
-	// @ts-expect-error "debug" is an unenv alias, not installed locally
-	const debug = (await import("debug")).default;
-	const logs: string[] = [];
-
-	// Append all logs to the array instead of logging to console
-	debug.log = (...args: string[]) =>
-		logs.push(args.map((arg) => arg.toString()).join(" "));
-
-	// This should log because as `DEBUG` is set to "enabled".
-	const enabledLog = debug("enabled");
-	enabledLog("This should be logged");
-
-	// This should not log as `DEBUG` does not contain "enabled:disabled"
-	const disabledLog = enabledLog.extend("disabled");
-	disabledLog("This should not be logged");
-
-	assert.deepEqual(logs, ["enabled This should be logged +0ms"]);
-}
-
-export async function testRequireDebug() {
-	// eslint-disable-next-line @typescript-eslint/no-require-imports
-	const debug = require("debug");
-	const logs: string[] = [];
-
-	// Append all logs to the array instead of logging to console
-	debug.log = (...args: string[]) =>
-		logs.push(args.map((arg) => arg.toString()).join(" "));
-
-	// This should log because as `DEBUG` is set to "enabled".
-	const enabledLog = debug("enabled");
-	enabledLog("This should be logged");
-
-	// This should not log as `DEBUG` does not contain "enabled:disabled"
-	const disabledLog = enabledLog.extend("disabled");
-	disabledLog("This should not be logged");
-
-	assert.deepEqual(logs, ["enabled This should be logged +0ms"]);
-}
-
-export async function testHttp() {
-	const http = await import("http");
-
-	const useNativeHttp = getRuntimeFlagValue("enable_nodejs_http_modules");
-
-	if (useNativeHttp) {
-		// Test the workerd implementation only
-		assert.doesNotThrow(() => http.validateHeaderName("x-header"));
-		assert.doesNotThrow(() => http.validateHeaderValue("x-header", "value"));
-	} else {
-		// Test the unenv polyfill only
-		assert.throws(() => http.validateHeaderName("x-header"), /not implemented/);
-		assert.throws(
-			() => http.validateHeaderValue("x-header", "value"),
-			/not implemented/
+	async testTimers() {
+		const timers = await import("node:timers");
+		const timeout = timers.setTimeout(() => null, 1000);
+		// active is deprecated and no more in the type
+		(timers as unknown as { active: (t: NodeJS.Timeout) => void }).active(
+			timeout
 		);
-	}
+		timers.clearTimeout(timeout);
 
-	assert.ok(http.METHODS.includes("GET"));
-	assert.strictEqual(typeof http.get, "function");
-	assert.strictEqual(typeof http.request, "function");
-	assert.deepEqual(http.STATUS_CODES[404], "Not Found");
-}
+		const timersPromises = await import("node:timers/promises");
+		assert.strictEqual(
+			await timersPromises.setTimeout(1, "timeout"),
+			"timeout"
+		);
+	},
 
-export async function testHttps() {
-	const https = await import("https");
+	async testNet() {
+		const net = await import("node:net");
+		assert.strictEqual(typeof net, "object");
+		assert.strictEqual(typeof net.createConnection, "function");
+		assert.throws(() => net.createServer(), /not implemented/);
+	},
 
-	assert.strictEqual(typeof https.Agent, "function");
-	assert.strictEqual(typeof https.get, "function");
-	assert.strictEqual(typeof https.globalAgent, "object");
-	assert.strictEqual(typeof https.request, "function");
-}
+	async testTls() {
+		const tls = await import("node:tls");
+		assert.strictEqual(typeof tls, "object");
+		// @ts-expect-error Node types are wrong
+		assert.strictEqual(typeof tls.convertALPNProtocols, "function");
+		assert.strictEqual(typeof tls.createSecureContext, "function");
+		assert.strictEqual(typeof tls.createServer, "function");
+		assert.strictEqual(typeof tls.checkServerIdentity, "function");
+		assert.strictEqual(typeof tls.getCiphers, "function");
+
+		// Test constants
+		assert.strictEqual(typeof tls.CLIENT_RENEG_LIMIT, "number");
+		assert.strictEqual(typeof tls.CLIENT_RENEG_WINDOW, "number");
+		assert.strictEqual(typeof tls.DEFAULT_ECDH_CURVE, "string");
+		assert.strictEqual(typeof tls.DEFAULT_CIPHERS, "string");
+		assert.strictEqual(typeof tls.DEFAULT_MIN_VERSION, "string");
+		assert.strictEqual(typeof tls.DEFAULT_MAX_VERSION, "string");
+		assert.ok(Array.isArray(tls.rootCertificates));
+	},
+
+	async testHttp() {
+		const http = await import("node:http");
+
+		const useNativeHttp = getRuntimeFlagValue("enable_nodejs_http_modules");
+
+		if (useNativeHttp) {
+			// Test the workerd implementation only
+			assert.doesNotThrow(() => http.validateHeaderName("x-header"));
+			assert.doesNotThrow(() => http.validateHeaderValue("x-header", "value"));
+		} else {
+			// Test the unenv polyfill only
+			assert.throws(
+				() => http.validateHeaderName("x-header"),
+				/not implemented/
+			);
+			assert.throws(
+				() => http.validateHeaderValue("x-header", "value"),
+				/not implemented/
+			);
+		}
+
+		assert.ok(http.METHODS.includes("GET"));
+		assert.strictEqual(typeof http.get, "function");
+		assert.strictEqual(typeof http.request, "function");
+		assert.deepEqual(http.STATUS_CODES[404], "Not Found");
+	},
+
+	async testHttps() {
+		const https = await import("node:https");
+
+		assert.strictEqual(typeof https.Agent, "function");
+		assert.strictEqual(typeof https.get, "function");
+		assert.strictEqual(typeof https.globalAgent, "object");
+		assert.strictEqual(typeof https.request, "function");
+	},
+
+	async testHttpServer() {
+		const http = await import("node:http");
+
+		const useNativeHttp = getRuntimeFlagValue(
+			"enable_nodejs_http_server_modules"
+		);
+
+		if (useNativeHttp) {
+			// Test the workerd implementation only
+			let server: unknown;
+			assert.doesNotThrow(
+				() =>
+					(server = http.createServer((_req, res) => {
+						res.end();
+					}))
+			);
+			assert.deepEqual(server instanceof http.Server, true);
+		} else {
+			// Test the unenv polyfill only
+			assert.throws(() => http.createServer(), /not implemented/);
+			assert.throws(() => new http.Server(), /not implemented/);
+		}
+	},
+
+	async testHttpsServer() {
+		const https = await import("node:https");
+
+		const useNativeHttp = getRuntimeFlagValue(
+			"enable_nodejs_http_server_modules"
+		);
+
+		if (useNativeHttp) {
+			// Test the workerd implementation only
+			let server: unknown;
+			assert.doesNotThrow(
+				() =>
+					(server = https.createServer((_req, res) => {
+						res.end();
+					}))
+			);
+			assert.deepEqual(server instanceof https.Server, true);
+		} else {
+			// Test the unenv polyfill only
+			assert.throws(() => https.createServer(), /not implemented/);
+			assert.throws(() => new https.Server(), /not implemented/);
+		}
+	},
+
+	async testOs() {
+		const os = await import("node:os");
+
+		assert.strictEqual(typeof os.arch(), "string");
+		assert.strictEqual(typeof os.freemem(), "number");
+		assert.strictEqual(typeof os.availableParallelism(), "number");
+	},
+
+	async testAsyncHooks() {
+		const asyncHooks = await import("node:async_hooks");
+
+		const storage = new asyncHooks.AsyncLocalStorage();
+		const result = await storage.run({ test: "value" }, async () => {
+			return storage.getStore();
+		});
+		assert.deepStrictEqual(result, { test: "value" });
+
+		const resource = new asyncHooks.AsyncResource("TEST");
+		assert.ok(resource instanceof asyncHooks.AsyncResource);
+
+		assert.strictEqual(typeof asyncHooks.createHook, "function");
+		const hook = asyncHooks.createHook({});
+		assert.strictEqual(typeof hook.enable, "function");
+		assert.strictEqual(typeof hook.disable, "function");
+
+		assert.strictEqual(typeof asyncHooks.executionAsyncId(), "number");
+		assert.strictEqual(typeof asyncHooks.executionAsyncResource(), "object");
+		assert.strictEqual(typeof asyncHooks.triggerAsyncId(), "number");
+		assert.strictEqual(typeof asyncHooks.asyncWrapProviders, "object");
+	},
+
+	async testAsyncHooksRequire() {
+		const module = await import("node:module");
+		const require = module.createRequire("/");
+		const asyncHooks = require("async_hooks");
+
+		const storage = new asyncHooks.AsyncLocalStorage();
+		const result = await storage.run({ test: "require" }, async () => {
+			return storage.getStore();
+		});
+		assert.deepStrictEqual(result, { test: "require" });
+	},
+
+	async testFs() {
+		const fs = await import("node:fs");
+		const fsp = await import("node:fs/promises");
+
+		const useNativeFs = getRuntimeFlagValue("enable_nodejs_fs_module");
+
+		if (useNativeFs) {
+			fs.writeFileSync("/tmp/sync", "sync");
+			assert.strictEqual(fs.readFileSync("/tmp/sync", "utf-8"), "sync");
+			await fsp.writeFile("/tmp/async", "async");
+			assert.strictEqual(await fsp.readFile("/tmp/async", "utf-8"), "async");
+
+			const blob = await fs.openAsBlob("/tmp/sync");
+			assert.ok(blob instanceof Blob);
+
+			// Old names in fs namespace
+			assert.strictEqual((fs as any).FileReadStream, fs.ReadStream);
+			assert.strictEqual((fs as any).FileWriteStream, fs.WriteStream);
+			assert.equal((fs as any).F_OK, 0);
+			assert.equal((fs as any).R_OK, 4);
+			assert.equal((fs as any).W_OK, 2);
+			assert.equal((fs as any).X_OK, 1);
+		} else {
+			assert.throws(
+				() => fs.readFileSync("/tmp/file", "utf-8"),
+				/not implemented/
+			);
+			await assert.rejects(
+				async () => await fsp.readFile("/tmp/file", "utf-8"),
+				/not implemented/
+			);
+
+			assert.throws(() => fs.openAsBlob("/tmp/sync"), /not implemented/);
+		}
+	},
+
+	async testModule() {
+		const module = await import("node:module");
+		const exportNames = [
+			"createRequire",
+			"enableCompileCache",
+			"findSourceMap",
+			"getCompileCacheDir",
+			"getSourceMapsSupport",
+			"isBuiltin",
+			"register",
+			"runMain",
+			"setSourceMapsSupport",
+			"stripTypeScriptTypes",
+			"syncBuiltinESMExports",
+			"wrap",
+			"flushCompileCache",
+			"findPackageJSON",
+			"_debug",
+			"_findPath",
+			"_initPaths",
+			"_load",
+			"_preloadModules",
+			"_resolveFilename",
+			"_resolveLookupPaths",
+			"_nodeModulePaths",
+			"Module",
+			"SourceMap",
+		];
+
+		for (const name of exportNames) {
+			// @ts-expect-error TS7053
+			assert.strictEqual(typeof module[name], "function");
+		}
+
+		// @ts-expect-error TS2339 Invalid node/types.
+		assert.ok(Array.isArray(module.globalPaths));
+		assert.ok(Array.isArray(module.builtinModules));
+		// @ts-expect-error TS2339 Invalid node/types.
+		assert.strictEqual(typeof module.constants, "object");
+		// @ts-expect-error TS2339 Invalid node/types.
+		assert.strictEqual(typeof module._cache, "object");
+		// @ts-expect-error TS2339 Invalid node/types.
+		assert.strictEqual(typeof module._extensions, "object");
+		// @ts-expect-error TS2339 Invalid node/types.
+		assert.strictEqual(typeof module._pathCache, "object");
+	},
+
+	async testConstants() {
+		const constants = await import("node:constants");
+
+		assert.deepStrictEqual(constants.O_RDONLY, 0);
+		assert.deepStrictEqual(constants.O_WRONLY, 1);
+		assert.deepStrictEqual(constants.O_RDWR, 2);
+	},
+
+	async testHttp2() {
+		const http2 = await import("node:http2");
+
+		assert.strictEqual(typeof http2.createSecureServer, "function");
+		assert.strictEqual(typeof http2.connect, "function");
+		assert.strictEqual(http2.constants.HTTP2_HEADER_STATUS, ":status");
+	},
+};

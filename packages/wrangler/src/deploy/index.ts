@@ -144,6 +144,13 @@ export const deployCommand = createCommand({
 			requiresArg: true,
 			array: true,
 		},
+		domains: {
+			describe: "Custom domains to deploy to",
+			alias: "domain",
+			type: "string",
+			requiresArg: true,
+			array: true,
+		},
 		"jsx-factory": {
 			describe: "The function that is called for each JSX element",
 			type: "string",
@@ -219,6 +226,17 @@ export const deployCommand = createCommand({
 			hidden: true,
 			alias: "x-auto-create",
 		},
+		"containers-rollout": {
+			describe:
+				"Rollout strategy for Containers changes. If set to immediate, it will override `rollout_percentage_steps` if configured and roll out to 100% of instances in one step. ",
+			choices: ["immediate", "gradual"] as const,
+		},
+		"experimental-deploy-remote-diff-check": {
+			describe: `Experimental: Enable The Deployment Remote Diff check`,
+			type: "boolean",
+			hidden: true,
+			alias: ["x-remote-diff-check"],
+		},
 	},
 	behaviour: {
 		useConfigRedirectIfAvailable: true,
@@ -226,6 +244,7 @@ export const deployCommand = createCommand({
 			MULTIWORKER: false,
 			RESOURCES_PROVISION: args.experimentalProvision ?? false,
 			REMOTE_BINDINGS: args.experimentalRemoteBindings ?? false,
+			DEPLOY_REMOTE_DIFF_CHECK: args.experimentalDeployRemoteDiffCheck ?? false,
 		}),
 		warnIfMultipleEnvsConfiguredButNoneSpecified: true,
 	},
@@ -344,6 +363,7 @@ export const deployCommand = createCommand({
 			jsxFragment: args.jsxFragment,
 			tsconfig: args.tsconfig,
 			routes: args.routes,
+			domains: args.domains,
 			assetsOptions,
 			legacyAssetPaths: siteAssetPaths,
 			legacyEnv: isLegacyEnv(config),
@@ -361,6 +381,7 @@ export const deployCommand = createCommand({
 			projectRoot,
 			dispatchNamespace: args.dispatchNamespace,
 			experimentalAutoCreate: args.experimentalAutoCreate,
+			containersRollout: args.containersRollout,
 		});
 
 		writeOutput({

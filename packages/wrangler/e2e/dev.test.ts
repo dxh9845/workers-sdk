@@ -584,6 +584,7 @@ describe("hyperdrive dev tests", () => {
 
 		const text = await fetchText(url);
 
+		assert(text);
 		const hyperdrive = new URL(text);
 		expect(hyperdrive.pathname).toBe("/some_db");
 		expect(hyperdrive.username).toBe("user");
@@ -2378,7 +2379,7 @@ describe(".env support in local dev", () => {
 		});
 
 		const worker = helper.runLongLived("wrangler dev", {
-			env: { CLOUDFLARE_LOAD_DEV_VARS_FROM_DOT_ENV: "false" },
+			env: { ...process.env, CLOUDFLARE_LOAD_DEV_VARS_FROM_DOT_ENV: "false" },
 		});
 		const { url } = await worker.waitForReady();
 		expect(await (await fetch(url)).text()).toMatchInlineSnapshot(`

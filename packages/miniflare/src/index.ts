@@ -11,9 +11,9 @@ import { Duplex, Transform, Writable } from "stream";
 import { ReadableStream } from "stream/web";
 import util from "util";
 import zlib from "zlib";
+import { checkMacOSVersion } from "@cloudflare/cli";
 import exitHook from "exit-hook";
 import { $ as colors$, green } from "kleur/colors";
-import { npxImport } from "npx-import";
 import stoppable from "stoppable";
 import {
 	Dispatcher,
@@ -47,7 +47,10 @@ import {
 	HELLO_WORLD_PLUGIN_NAME,
 	HOST_CAPNP_CONNECT,
 	KV_PLUGIN_NAME,
+	launchBrowser,
+	loadExternalPlugins,
 	normaliseDurableObject,
+	Plugin,
 	PLUGIN_ENTRIES,
 	Plugins,
 	PluginServicesOptions,
@@ -110,8 +113,6 @@ import {
 	createInboundDoProxyService,
 	createOutboundDoProxyService,
 	createProxyFallbackService,
-	extractDoFetchProxyTarget,
-	extractServiceFetchProxyTarget,
 	getHttpProxyOptions,
 	getOutboundDoProxyClassName,
 	getProtocol,
@@ -142,7 +143,7 @@ import type {
 	Queue,
 	R2Bucket,
 } from "@cloudflare/workers-types/experimental";
-import type { ChildProcess } from "child_process";
+import type { Process } from "@puppeteer/browsers";
 
 const DEFAULT_HOST = "127.0.0.1";
 function getURLSafeHost(host: string) {
@@ -332,63 +333,114 @@ function getDurableObjectClassNames(
 	allWorkerOpts: PluginWorkerOptions[]
 ): DurableObjectClassNames {
 	const serviceClassNames: DurableObjectClassNames = new Map();
-	for (const workerOpts of allWorkerOpts) {
-		const workerServiceName = getUserServiceName(workerOpts.core.name);
-		for (const designator of Object.values(
-			workerOpts.do.durableObjects ?? {}
-		)) {
-			const {
-				className,
-				// Fallback to current worker service if name not defined
-				serviceName = workerServiceName,
-				enableSql,
-				unsafeUniqueKey,
-				unsafePreventEviction,
+
+	const allDurableObjects = allWorkerOpts
+		.flatMap((workerOpts) => {
+			const workerServiceName = getUserServiceName(workerOpts.core.name);
+
+			return Object.values(workerOpts.do.durableObjects ?? {}).map(
+				(workerDODesignator) => {
+					const doInfo = normaliseDurableObject(workerDODesignator);
+					if (doInfo.serviceName === undefined) {
+						// Fallback to current worker service if name not defined
+						doInfo.serviceName = workerServiceName;
+					}
+					return {
+						doInfo,
+						workerRawName: workerOpts.core.name,
+					};
+				}
+			);
+		})
+		// We sort the list of durable objects because we want the durable objects without a scriptName or a scriptName
+		// that matches the raw worker's name (meaning that they are defined within their worker) to be processed first
+		.sort(({ doInfo, workerRawName }) =>
+			doInfo.scriptName === undefined || doInfo.scriptName === workerRawName
+				? -1
+				: 0
+		)
+		.map(({ doInfo }) => doInfo);
+
+	for (const doInfo of allDurableObjects) {
+		const { className, serviceName, container, ...doConfigs } = doInfo;
+		// We know that the service name is always defined (since if it is not we do default it to the current worker service)
+		assert(serviceName);
+		// Get or create `Map` mapping class name to optional unsafe unique key
+		let classNames = serviceClassNames.get(serviceName);
+		if (classNames === undefined) {
+			classNames = new Map();
+			serviceClassNames.set(serviceName, classNames);
+		}
+
+		if (classNames.has(className)) {
+			// If we've already seen this class in this service, make sure the
+			// unsafe unique keys and unsafe prevent eviction values match
+			const existingInfo = classNames.get(className);
+
+			const isDoUnacceptableDiff = (
+				field: Extract<
+					keyof typeof doConfigs,
+					"enableSql" | "unsafeUniqueKey" | "unsafePreventEviction"
+				>
+			) => {
+				if (!existingInfo) {
+					return false;
+				}
+
+				const same = existingInfo[field] === doConfigs[field];
+				if (same) {
+					return false;
+				}
+
+				const oneIsUndefined =
+					existingInfo[field] === undefined || doConfigs[field] === undefined;
+
+				// If one of the configurations is `undefined` (either the current one or the existing one) then there we
+				// want to consider this as an acceptable difference since we might be in a potentially valid situation in
+				// which worker A defines a DO with a config, while worker B simply uses the DO from worker A but without
+				// providing the configuration (thus leaving it `undefined`) (this for example is exactly what Wrangler does
+				// with the implicitly defined `enableSql` flag)
+				if (oneIsUndefined) {
+					return false;
+				}
+
+				return true;
+			};
+
+			if (isDoUnacceptableDiff("enableSql")) {
+				throw new MiniflareCoreError(
+					"ERR_DIFFERENT_STORAGE_BACKEND",
+					`Different storage backends defined for Durable Object "${className}" in "${serviceName}": ${JSON.stringify(
+						doConfigs.enableSql
+					)} and ${JSON.stringify(existingInfo?.enableSql)}`
+				);
+			}
+
+			if (isDoUnacceptableDiff("unsafeUniqueKey")) {
+				throw new MiniflareCoreError(
+					"ERR_DIFFERENT_UNIQUE_KEYS",
+					`Multiple unsafe unique keys defined for Durable Object "${className}" in "${serviceName}": ${JSON.stringify(
+						doConfigs.unsafeUniqueKey
+					)} and ${JSON.stringify(existingInfo?.unsafeUniqueKey)}`
+				);
+			}
+
+			if (isDoUnacceptableDiff("unsafePreventEviction")) {
+				throw new MiniflareCoreError(
+					"ERR_DIFFERENT_PREVENT_EVICTION",
+					`Multiple unsafe prevent eviction values defined for Durable Object "${className}" in "${serviceName}": ${JSON.stringify(
+						doConfigs.unsafePreventEviction
+					)} and ${JSON.stringify(existingInfo?.unsafePreventEviction)}`
+				);
+			}
+		} else {
+			// Otherwise, just add it
+			classNames.set(className, {
+				enableSql: doConfigs.enableSql,
+				unsafeUniqueKey: doConfigs.unsafeUniqueKey,
+				unsafePreventEviction: doConfigs.unsafePreventEviction,
 				container,
-			} = normaliseDurableObject(designator);
-			// Get or create `Map` mapping class name to optional unsafe unique key
-			let classNames = serviceClassNames.get(serviceName);
-			if (classNames === undefined) {
-				classNames = new Map();
-				serviceClassNames.set(serviceName, classNames);
-			}
-			if (classNames.has(className)) {
-				// If we've already seen this class in this service, make sure the
-				// unsafe unique keys and unsafe prevent eviction values match
-				const existingInfo = classNames.get(className);
-				if (existingInfo?.enableSql !== enableSql) {
-					throw new MiniflareCoreError(
-						"ERR_DIFFERENT_STORAGE_BACKEND",
-						`Different storage backends defined for Durable Object "${className}" in "${serviceName}": ${JSON.stringify(
-							enableSql
-						)} and ${JSON.stringify(existingInfo?.enableSql)}`
-					);
-				}
-				if (existingInfo?.unsafeUniqueKey !== unsafeUniqueKey) {
-					throw new MiniflareCoreError(
-						"ERR_DIFFERENT_UNIQUE_KEYS",
-						`Multiple unsafe unique keys defined for Durable Object "${className}" in "${serviceName}": ${JSON.stringify(
-							unsafeUniqueKey
-						)} and ${JSON.stringify(existingInfo?.unsafeUniqueKey)}`
-					);
-				}
-				if (existingInfo?.unsafePreventEviction !== unsafePreventEviction) {
-					throw new MiniflareCoreError(
-						"ERR_DIFFERENT_PREVENT_EVICTION",
-						`Multiple unsafe prevent eviction values defined for Durable Object "${className}" in "${serviceName}": ${JSON.stringify(
-							unsafePreventEviction
-						)} and ${JSON.stringify(existingInfo?.unsafePreventEviction)}`
-					);
-				}
-			} else {
-				// Otherwise, just add it
-				classNames.set(className, {
-					enableSql,
-					unsafeUniqueKey,
-					unsafePreventEviction,
-					container,
-				});
-			}
+			});
 		}
 	}
 	return serviceClassNames;
@@ -396,13 +448,12 @@ function getDurableObjectClassNames(
 
 /**
  * This collects all external service bindings from all workers and overrides
- * it to point to a proxy in the loopback server. A fallback service will be created
+ * it to point to the dev registry proxy. A fallback service will be created
  * for each of the external service in case the external service is not available.
  */
 function getExternalServiceEntrypoints(
 	allWorkerOpts: PluginWorkerOptions[],
-	loopbackHost: string,
-	loopbackPort: number
+	proxyAddress: string
 ) {
 	const externalServices = new Map<
 		string,
@@ -446,7 +497,7 @@ function getExternalServiceEntrypoints(
 					// Override it to connect to the dev registry proxy
 					workerOpts.core.serviceBindings[name] = {
 						external: {
-							address: `${loopbackHost}:${loopbackPort}`,
+							address: proxyAddress,
 							http: getHttpProxyOptions(serviceName, entrypoint),
 						},
 					};
@@ -515,7 +566,7 @@ function getExternalServiceEntrypoints(
 					// Override it to connect to the dev registry proxy
 					workerOpts.core.tails[i] = {
 						external: {
-							address: `${loopbackHost}:${loopbackPort}`,
+							address: proxyAddress,
 							http: getHttpProxyOptions(serviceName, entrypoint),
 						},
 					};
@@ -850,8 +901,14 @@ export class Miniflare {
 	#workerOpts: PluginWorkerOptions[];
 	#log: Log;
 
-	// key is the browser wsEndpoint, value is the browser process
-	#browserProcesses: Map<string, ChildProcess> = new Map();
+	/**
+	 * externalPlugins is a list of external plugins that have been loaded
+	 * after being referenced by an unsafe binding
+	 */
+	#externalPlugins: Map<string, Plugin<z.ZodTypeAny>> = new Map();
+
+	// key is the browser session ID, value is the browser process
+	#browserProcesses: Map<string, Process> = new Map();
 
 	readonly #runtime?: Runtime;
 	readonly #removeExitHook?: () => void;
@@ -893,6 +950,9 @@ export class Miniflare {
 	constructor(opts: MiniflareOptions) {
 		// Split and validate options
 		const [sharedOpts, workerOpts] = validateOptions(opts);
+
+		checkMacOSVersion({ shouldThrow: true });
+
 		this.#sharedOpts = sharedOpts;
 		this.#workerOpts = workerOpts;
 
@@ -965,6 +1025,7 @@ export class Miniflare {
 		this.#devRegistry = new DevRegistry(
 			this.#sharedOpts.core.unsafeDevRegistryPath,
 			this.#sharedOpts.core.unsafeDevRegistryDurableObjectProxy,
+			this.#sharedOpts.core.unsafeHandleDevRegistryUpdate,
 			this.#log
 		);
 
@@ -1092,81 +1153,10 @@ export class Miniflare {
 		return this.#workerOpts.map<NameSourceOptions>(({ core }) => core);
 	}
 
-	#getFallbackServiceAddress(
-		service: string,
-		entrypoint: string
-	): {
-		httpStyle: "host" | "proxy";
-		protocol: "http" | "https";
-		host: string;
-		port: number;
-	} {
-		assert(
-			this.#socketPorts !== undefined && this.#runtimeEntryURL !== undefined,
-			"Cannot resolve address for fallback service before runtime is initialised"
-		);
-
-		const port = this.#socketPorts.get(
-			getProxyFallbackServiceSocketName(service, entrypoint)
-		);
-
-		if (!port) {
-			throw new Error(
-				`There is no socket opened for "${service}" with the "${entrypoint}" entrypoint`
-			);
-		}
-
-		return {
-			httpStyle: "proxy",
-			protocol: getProtocol(this.#runtimeEntryURL),
-			host: this.#runtimeEntryURL.hostname,
-			port,
-		};
-	}
-
 	#handleLoopback = async (
 		req: http.IncomingMessage,
 		res?: http.ServerResponse
 	): Promise<Response | undefined> => {
-		const serviceProxyTarget = extractServiceFetchProxyTarget(req);
-
-		if (serviceProxyTarget) {
-			assert(res !== undefined, "No response object provided");
-
-			const address =
-				this.#devRegistry.getExternalServiceAddress(
-					serviceProxyTarget.service,
-					serviceProxyTarget.entrypoint
-				) ??
-				this.#getFallbackServiceAddress(
-					serviceProxyTarget.service,
-					serviceProxyTarget.entrypoint
-				);
-
-			this.#handleProxy(req, res, address);
-			return;
-		}
-
-		const doProxyTarget = extractDoFetchProxyTarget(req);
-
-		if (doProxyTarget) {
-			assert(res !== undefined, "No response object provided");
-
-			const address = this.#devRegistry.getExternalDurableObjectAddress(
-				doProxyTarget.scriptName,
-				doProxyTarget.className
-			);
-
-			if (!address) {
-				res.writeHead(503);
-				res.end("Service Unavailable");
-				return;
-			}
-
-			this.#handleProxy(req, res, address);
-			return;
-		}
-
 		const customNodeService =
 			req.headers[CoreHeaders.CUSTOM_NODE_SERVICE.toLowerCase()];
 		if (typeof customNodeService === "string") {
@@ -1249,31 +1239,31 @@ export class Miniflare {
 				this.#log.logWithLevel(logLevel, message);
 				response = new Response(null, { status: 204 });
 			} else if (url.pathname === "/browser/launch") {
-				// Version should be kept in sync with the supported version at https://github.com/cloudflare/puppeteer?tab=readme-ov-file#workers-version-of-puppeteer-core
-				const puppeteer = await npxImport(
-					"puppeteer@22.8.2",
-					this.#log.warn.bind(this.#log)
-				);
-
-				// @ts-expect-error Puppeteer is dynamically installed, and so doesn't have types available
-				const browser = await puppeteer.launch({
-					headless: "old",
-					// workaround for CI environments, to avoid sandboxing issues
-					args: process.env.CI ? ["--no-sandbox"] : [],
+				const { sessionId, browserProcess, startTime, wsEndpoint } =
+					await launchBrowser({
+						// Puppeteer v22.8.2 supported chrome version:
+						// https://pptr.dev/supported-browsers#supported-browser-version-list
+						//
+						// It should match the supported chrome version for the upstream puppeteer
+						// version from which @cloudflare/puppeteer branched off, which is specified in:
+						// https://github.com/cloudflare/puppeteer/tree/v1.0.2?tab=readme-ov-file#workers-version-of-puppeteer-core
+						browserVersion: "124.0.6367.207",
+						log: this.#log,
+						tmpPath: this.#tmpPath,
+					});
+				browserProcess.nodeProcess.on("exit", () => {
+					this.#browserProcesses.delete(sessionId);
 				});
-				const wsEndpoint = browser.wsEndpoint();
-				this.#browserProcesses.set(wsEndpoint, browser.process());
-				response = new Response(wsEndpoint);
+				this.#browserProcesses.set(sessionId, browserProcess);
+				response = Response.json({ wsEndpoint, sessionId, startTime });
 			} else if (url.pathname === "/browser/status") {
-				const wsEndpoint = url.searchParams.get("wsEndpoint");
-				assert(wsEndpoint !== null, "Missing wsEndpoint query parameter");
-				const process = this.#browserProcesses.get(wsEndpoint);
-				const status = {
-					stopped: !process || process.exitCode !== null,
-				};
-				response = new Response(JSON.stringify(status), {
-					headers: { "Content-Type": "application/json" },
-				});
+				const sessionId = url.searchParams.get("sessionId");
+				assert(sessionId !== null, "Missing sessionId query parameter");
+				const process = this.#browserProcesses.get(sessionId);
+				response = new Response(null, { status: process ? 200 : 410 });
+			} else if (url.pathname === "/browser/sessionIds") {
+				const sessionIds = this.#browserProcesses.keys();
+				response = Response.json(Array.from(sessionIds));
 			} else if (url.pathname === "/core/store-temp-file") {
 				const prefix = url.searchParams.get("prefix");
 				const folder = prefix ? `files/${prefix}` : "files";
@@ -1357,109 +1347,6 @@ export class Miniflare {
 
 		// Otherwise, send the response as is (e.g. unauthorised)
 		await this.#writeResponse(response, res);
-	};
-
-	#handleLoopbackConnect = async (
-		req: http.IncomingMessage,
-		clientSocket: Duplex,
-		head: Buffer
-	) => {
-		try {
-			const connectHost = req.url;
-			const [serviceName, entrypoint] = connectHost?.split(":") ?? [];
-			const address =
-				this.#devRegistry.getExternalServiceAddress(serviceName, entrypoint) ??
-				this.#getFallbackServiceAddress(serviceName, entrypoint);
-
-			const serverSocket = net.connect(address.port, address.host, () => {
-				serverSocket.write(`CONNECT ${HOST_CAPNP_CONNECT} HTTP/1.1\r\n\r\n`);
-
-				// Push along any buffered bytes
-				if (head && head.length) {
-					serverSocket.write(head);
-				}
-
-				serverSocket.pipe(clientSocket);
-				clientSocket.pipe(serverSocket);
-			});
-
-			// Errors on either side
-			serverSocket.on("error", (err) => {
-				this.#log.error(err);
-				clientSocket.end();
-			});
-			clientSocket.on("error", () => serverSocket.end());
-
-			// Close the tunnel if the service is updated
-			// This make sure workerd will re-connect to the latest address
-			this.#devRegistry.subscribe(serviceName, () => {
-				this.#log.debug(
-					`Closing tunnel as service "${serviceName}" was updated`
-				);
-				clientSocket.end();
-			});
-		} catch (ex: any) {
-			this.#log.error(ex);
-			clientSocket.end();
-		}
-	};
-
-	#handleProxy = (
-		req: http.IncomingMessage,
-		res: http.ServerResponse,
-		target: {
-			protocol: "http" | "https";
-			host: string;
-			port: number;
-			httpStyle?: "host" | "proxy";
-			path?: string;
-		}
-	) => {
-		const headers = { ...req.headers };
-		let path = target.path;
-
-		if (!path) {
-			switch (target.httpStyle) {
-				case "host": {
-					const url = new URL(req.url ?? `http://${req.headers.host}`);
-					// If the target is a host, use the path from the request URL
-					path = url.pathname + url.search + url.hash;
-					headers.host = url.host;
-					break;
-				}
-				case "proxy": {
-					// If the target is a proxy, use the full request URL
-					path = req.url;
-					break;
-				}
-			}
-		}
-
-		const options: http.RequestOptions = {
-			host: target.host,
-			port: target.port,
-			method: req.method,
-			path,
-			headers,
-		};
-
-		// Res is optional only on websocket upgrade requests
-		assert(res !== undefined, "No response object provided");
-		const upstream = http.request(options, (upRes) => {
-			// Relay status and headers back to the original client
-			res.writeHead(upRes.statusCode ?? 500, upRes.headers);
-			// Pipe the response body
-			upRes.pipe(res);
-		});
-
-		// Pipe the client request body to the upstream
-		req.pipe(upstream);
-
-		upstream.on("error", (err) => {
-			this.#log.error(err);
-			if (!res.headersSent) res.writeHead(502);
-			res.end("Bad Gateway");
-		});
 	};
 
 	async #writeResponse(response: Response, res: http.ServerResponse) {
@@ -1547,17 +1434,9 @@ export class Miniflare {
 
 		return new Promise((resolve) => {
 			const server = stoppable(
-				http.createServer(
-					{
-						// There might be no HOST header when proxying a fetch request made over service binding
-						//  e.g. env.MY_WORKER.fetch("https://example.com")
-						requireHostHeader: false,
-					},
-					this.#handleLoopback
-				),
+				http.createServer(this.#handleLoopback),
 				/* grace */ 0
 			);
-			server.on("connect", this.#handleLoopbackConnect);
 			server.on("upgrade", this.#handleLoopbackUpgrade);
 			server.listen(0, hostname, () => resolve(server));
 		});
@@ -1585,20 +1464,78 @@ export class Miniflare {
 		return `${getURLSafeHost(host)}:${requestedPort ?? 0}`;
 	}
 
+	/**
+	 * Load all external plugins referenced by any unsafe bindings, and store them on the class
+	 * Loaded plugins are preserved across runtime reloads, and so should only be loaded once per binding
+	 */
+	async #loadExternalPlugins(workers: PluginWorkerOptions[]): Promise<void> {
+		const requestedExternalPlugins = new Map<
+			/* plugin name */ string,
+			/* package name */ string
+		>();
+
+		// De-duplicate requested external plugins across all Worker bindings
+		for (const worker of workers) {
+			for (const unsafeBinding of worker.core.unsafeBindings ?? []) {
+				requestedExternalPlugins.set(
+					unsafeBinding.plugin.name,
+					unsafeBinding.plugin.package
+				);
+			}
+		}
+
+		for (const [pluginName, packageName] of requestedExternalPlugins) {
+			// Only load "new" plugins. They'll be cached across Worker reloads
+			if (!this.#externalPlugins.has(pluginName)) {
+				const providedPlugins = await loadExternalPlugins(packageName);
+
+				// While this package can provide multiple plugins, make sure it at least provides the requested one
+				if (!providedPlugins[pluginName]) {
+					throw new MiniflareCoreError(
+						"ERR_PLUGIN_LOADING_FAILED",
+						`Package ${packageName} did not provide the plugin '${pluginName}'.`
+					);
+				}
+
+				// Load all plugins provided by this package, even if not requested, as they might be requested by a different Worker/binding.
+				for (const [name, plugin] of Object.entries(providedPlugins)) {
+					this.#externalPlugins.set(name, plugin);
+				}
+			}
+		}
+	}
+
+	/**
+	 * External plugins take an array of unsafe bindings that match the plugin name,
+	 * while internal plugins have more structured config.
+	 */
+	#getWorkerOptsForPlugin(pluginName: string, workerOpts: PluginWorkerOptions) {
+		if (this.#externalPlugins.has(pluginName)) {
+			return workerOpts.core.unsafeBindings?.filter(
+				(b) => b.plugin.name === pluginName
+			);
+		} else {
+			return workerOpts[pluginName as keyof PluginWorkerOptions];
+		}
+	}
+
 	async #assembleConfig(
-		loopbackHost: string,
-		loopbackPort: number
+		loopbackPort: number,
+		proxyAddress: string | null
 	): Promise<Config> {
 		const allPreviousWorkerOpts = this.#previousWorkerOpts;
 		const allWorkerOpts = this.#workerOpts;
 		const sharedOpts = this.#sharedOpts;
 
+		await this.#loadExternalPlugins(allWorkerOpts);
+
 		sharedOpts.core.cf = await setupCf(this.#log, sharedOpts.core.cf);
 		this.#cfObject = sharedOpts.core.cf;
 
-		const externalServices = this.#devRegistry.isEnabled()
-			? getExternalServiceEntrypoints(allWorkerOpts, loopbackHost, loopbackPort)
-			: null;
+		const externalServices =
+			proxyAddress !== null
+				? getExternalServiceEntrypoints(allWorkerOpts, proxyAddress)
+				: null;
 		const durableObjectClassNames = getDurableObjectClassNames(allWorkerOpts);
 		const wrappedBindingNames = getWrappedBindingNames(
 			allWorkerOpts,
@@ -1648,11 +1585,11 @@ export class Miniflare {
 			innerBindings: Worker_Binding[];
 		}[] = [];
 
-		for (const [key, plugin] of PLUGIN_ENTRIES) {
+		for (const [key, plugin] of this.#mergedPluginEntries) {
 			const pluginExtensions = await plugin.getExtensions?.({
 				// @ts-expect-error `CoreOptionsSchema` has required options which are
 				//  missing in other plugins' options.
-				options: allWorkerOpts.map((o) => o[key]),
+				options: allWorkerOpts.map((o) => this.#getWorkerOptsForPlugin(key, o)),
 			});
 			if (pluginExtensions) {
 				extensions.push(...pluginExtensions);
@@ -1683,10 +1620,12 @@ export class Miniflare {
 			const workerBindings: Worker_Binding[] = [];
 			allWorkerBindings.set(workerName, workerBindings);
 			const additionalModules: Worker_Module[] = [];
-			for (const [key, plugin] of PLUGIN_ENTRIES) {
-				// @ts-expect-error `CoreOptionsSchema` has required options which are
-				//  missing in other plugins' options.
-				const pluginBindings = await plugin.getBindings(workerOpts[key], i);
+
+			for (const [key, plugin] of this.#mergedPluginEntries) {
+				const pluginBindings = await plugin.getBindings(
+					this.#getWorkerOptsForPlugin(key, workerOpts),
+					i
+				);
 				if (pluginBindings !== undefined) {
 					for (const binding of pluginBindings) {
 						// If this is the Workers Sites manifest, we need to add it as a
@@ -1776,12 +1715,14 @@ export class Miniflare {
 				queueProducers,
 				queueConsumers,
 			};
-			for (const [key, plugin] of PLUGIN_ENTRIES) {
+			for (const [key, plugin] of this.#mergedPluginEntries) {
+				const workerOptions = this.#getWorkerOptsForPlugin(key, workerOpts);
+
 				const pluginServicesExtensions = await plugin.getServices({
 					...pluginServicesOptionsBase,
 					// @ts-expect-error `CoreOptionsSchema` has required options which are
 					//  missing in other plugins' options.
-					options: workerOpts[key],
+					options: workerOptions,
 					// @ts-expect-error `QueuesPlugin` doesn't define shared options
 					sharedOptions: sharedOpts[key],
 				});
@@ -1819,6 +1760,7 @@ export class Miniflare {
 			for (let j = 0; j < directSockets.length; j++) {
 				const previousDirectSocket = previousDirectSockets[j];
 				const directSocket = directSockets[j];
+				const serviceName = directSocket.serviceName ?? workerName;
 				const entrypoint = directSocket.entrypoint ?? "default";
 				const name = getDirectSocketName(i, entrypoint);
 				const address = this.#getSocketAddress(
@@ -1835,7 +1777,7 @@ export class Miniflare {
 								name: `${RPC_PROXY_SERVICE_NAME}:${workerOpts.core.name}`,
 							}
 						: {
-								name: getUserServiceName(workerName),
+								name: getUserServiceName(serviceName),
 								entrypoint: entrypoint === "default" ? undefined : entrypoint,
 							};
 
@@ -1886,9 +1828,6 @@ export class Miniflare {
 						},
 					});
 				}
-
-				// Ask the dev registry to watch for this service
-				this.#devRegistry.subscribe(serviceName);
 			}
 
 			const externalObjects = Array.from(externalServices).flatMap(
@@ -1900,12 +1839,15 @@ export class Miniflare {
 			);
 			const outboundDoProxyService = createOutboundDoProxyService(
 				externalObjects,
-				`http://${loopbackHost}:${loopbackPort}`,
+				`http://${proxyAddress}`,
 				this.#devRegistry.isDurableObjectProxyEnabled()
 			);
 
 			assert(outboundDoProxyService.name !== undefined);
 			services.set(outboundDoProxyService.name, outboundDoProxyService);
+
+			// Watch the dev registry for changes
+			await this.#devRegistry.watch(externalServices);
 		}
 
 		// Expose all internal durable object with a proxy service
@@ -1996,11 +1938,8 @@ export class Miniflare {
 	}
 
 	async #assembleAndUpdateConfig() {
-		for (const [wsEndpoint, process] of this.#browserProcesses.entries()) {
-			// .close() isn't enough
-			process.kill("SIGKILL");
-			this.#browserProcesses.delete(wsEndpoint);
-		}
+		await this.#closeBrowserProcesses();
+
 		// This function must be run with `#runtimeMutex` held
 		const initial = !this.#runtimeEntryURL;
 		assert(this.#runtime !== undefined);
@@ -2009,7 +1948,8 @@ export class Miniflare {
 			maybeGetLocallyAccessibleHost(configuredHost) ??
 			getURLSafeHost(configuredHost);
 		const loopbackPort = await this.#getLoopbackPort();
-		const config = await this.#assembleConfig(loopbackHost, loopbackPort);
+		const proxyAddress = await this.#devRegistry.initializeProxyWorker();
+		const config = await this.#assembleConfig(loopbackPort, proxyAddress);
 		const configBuffer = serializeConfig(config);
 
 		// Get all socket names we expect to get ports for
@@ -2166,6 +2106,18 @@ export class Miniflare {
 		}
 	}
 
+	async #closeBrowserProcesses() {
+		await Promise.all(
+			Array.from(this.#browserProcesses.values()).map((process) =>
+				process.close()
+			)
+		);
+		assert(
+			this.#browserProcesses.size === 0,
+			"Not all browser processes were closed"
+		);
+	}
+
 	async #waitForReady(disposing = false) {
 		// If `#init()` threw, we'd like to propagate the error here, so `await` it.
 		// Note we can't use `async`/`await` with getters. We'd also like to wait
@@ -2287,10 +2239,12 @@ export class Miniflare {
 
 	get ready(): Promise<URL> {
 		return this.#waitForReady().then(async (url) => {
+			assert(this.#socketPorts !== undefined);
+
+			// Update proxy server with the addresses of the fallback services
+			this.#devRegistry.configureProxyWorker(url.toString(), this.#socketPorts);
 			// Register all workers with the dev registry
 			await this.#registerWorkers(url);
-			// Watch for changes to the dev registry
-			await this.#devRegistry.watch();
 
 			return url;
 		});
@@ -2392,7 +2346,8 @@ export class Miniflare {
 
 		await this.#devRegistry.updateRegistryPath(
 			sharedOpts.core.unsafeDevRegistryPath,
-			sharedOpts.core.unsafeDevRegistryDurableObjectProxy
+			sharedOpts.core.unsafeDevRegistryDurableObjectProxy,
+			sharedOpts.core.unsafeHandleDevRegistryUpdate
 		);
 		// Send to runtime and wait for updates to process
 		await this.#assembleAndUpdateConfig();
@@ -2530,10 +2485,10 @@ export class Miniflare {
 		workerName = workerOpts.core.name ?? "";
 
 		// Populate bindings from each plugin
-		for (const [key, plugin] of PLUGIN_ENTRIES) {
-			// @ts-expect-error `CoreOptionsSchema` has required options which are
-			//  missing in other plugins' options.
-			const pluginBindings = await plugin.getNodeBindings(workerOpts[key]);
+		for (const [key, plugin] of this.#mergedPluginEntries) {
+			const pluginBindings = await plugin.getNodeBindings(
+				this.#getWorkerOptsForPlugin(key, workerOpts)
+			);
 			for (const [name, binding] of Object.entries(pluginBindings)) {
 				if (binding instanceof ProxyNodeBinding) {
 					const proxyBindingName = getProxyBindingName(key, workerName, name);
@@ -2694,6 +2649,10 @@ export class Miniflare {
 		return result;
 	}
 
+	get #mergedPluginEntries() {
+		return [...PLUGIN_ENTRIES, ...this.#externalPlugins.entries()];
+	}
+
 	async dispose(): Promise<void> {
 		this.#disposeController.abort();
 		// The `ProxyServer` "heap" will be destroyed when `workerd` shuts down,
@@ -2704,11 +2663,7 @@ export class Miniflare {
 		try {
 			await this.#waitForReady(/* disposing */ true);
 		} finally {
-			for (const [wsEndpoint, process] of this.#browserProcesses.entries()) {
-				// .close() isn't enough
-				process.kill("SIGKILL");
-				this.#browserProcesses.delete(wsEndpoint);
-			}
+			await this.#closeBrowserProcesses();
 
 			// Remove exit hook, we're cleaning up what they would've cleaned up now
 			this.#removeExitHook?.();
@@ -2740,4 +2695,9 @@ export * from "./shared";
 export * from "./workers";
 export * from "./merge";
 export * from "./zod-format";
-export { getDefaultDevRegistryPath } from "./shared/dev-registry";
+export {
+	type WorkerRegistry,
+	type WorkerDefinition,
+	getDefaultDevRegistryPath,
+	getWorkerRegistry,
+} from "./shared/dev-registry";

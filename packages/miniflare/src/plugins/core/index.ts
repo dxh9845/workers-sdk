@@ -71,6 +71,7 @@ import {
 	kCurrentWorker,
 	ServiceDesignatorSchema,
 } from "./services";
+import type { WorkerRegistry } from "../../shared/dev-registry";
 
 // `workerd`'s `trustBrowserCas` should probably be named `trustSystemCas`.
 // Rather than using a bundled CA store like Node, it uses
@@ -118,8 +119,14 @@ const UnusableStringSchema = z.string().transform(() => undefined);
 export const UnsafeDirectSocketSchema = z.object({
 	host: z.ostring(),
 	port: z.onumber(),
+	serviceName: z.ostring(),
 	entrypoint: z.ostring(),
 	proxy: z.oboolean(),
+});
+
+export const ExternalPluginSpecifier = z.object({
+	package: z.string(),
+	name: z.string(),
 });
 
 const CoreOptionsSchemaInput = z.intersection(
@@ -178,6 +185,17 @@ const CoreOptionsSchemaInput = z.intersection(
 				z.string(),
 			])
 			.optional(),
+
+		unsafeBindings: z
+			.array(
+				z.object({
+					name: z.string(),
+					type: z.string(),
+					plugin: ExternalPluginSpecifier,
+					options: z.record(JsonSchema),
+				})
+			)
+			.optional(),
 	})
 );
 export const CoreOptionsSchema = CoreOptionsSchemaInput.transform((value) => {
@@ -230,6 +248,10 @@ export const CoreSharedOptionsSchema = z.object({
 	unsafeDevRegistryPath: z.string().optional(),
 	// Enable External Durable Objects Proxy / Internal DOs registration
 	unsafeDevRegistryDurableObjectProxy: z.boolean().default(false),
+	// Called when external workers this instance depends on are updated in the dev registry
+	unsafeHandleDevRegistryUpdate: z
+		.function(z.tuple([z.custom<WorkerRegistry>()]))
+		.optional(),
 	// This is a shared secret between a proxy server and miniflare that can be
 	// passed in a header to prove that the request came from the proxy and not
 	// some malicious attacker.

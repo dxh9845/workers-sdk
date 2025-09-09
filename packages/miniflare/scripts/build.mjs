@@ -51,6 +51,15 @@ const miniflareZodExtensionPath = path.join(
 	"shared",
 	"zod.worker.ts"
 );
+
+/**
+ * An array of folders in `test/fixtures` that require transpilation
+ * via ESBuild
+ */
+const fixtureBuilds = [
+	path.join(pkgRoot, "test/fixtures/unsafe-plugin/index.ts"),
+];
+
 /**
  * `workerd` `extensions` don't have access to "built-in" modules like
  * `node:buffer`, but do have access to "internal" modules like
@@ -153,6 +162,14 @@ async function buildPackage() {
 	const pkg = getPackage(pkgRoot);
 
 	const indexPath = path.join(pkgRoot, "src", "index.ts");
+	// The dev registry proxy runs in a Node.js worker thread (instead of workerd) and
+	// requires a separate entry file
+	const devRegistryProxyPath = path.join(
+		pkgRoot,
+		"src",
+		"shared",
+		"dev-registry.worker.ts"
+	);
 	// Look for test files ending with .spec.ts in the test directory, default to
 	// empty array if not found
 	let testPaths = [];
@@ -163,6 +180,8 @@ async function buildPackage() {
 	} catch (e) {
 		if (e.code !== "ENOENT") throw e;
 	}
+	// Add any test fixtures that require transpilation via ESBuild
+	testPaths.push(...fixtureBuilds);
 	const outPath = path.join(pkgRoot, "dist");
 
 	const buildOptions = {
@@ -190,7 +209,7 @@ async function buildPackage() {
 		logLevel: watch ? "info" : "warning",
 		outdir: outPath,
 		outbase: pkgRoot,
-		entryPoints: [indexPath, ...testPaths],
+		entryPoints: [indexPath, devRegistryProxyPath, ...testPaths],
 	};
 	if (watch) {
 		const ctx = await esbuild.context(buildOptions);

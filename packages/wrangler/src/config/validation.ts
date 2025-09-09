@@ -32,6 +32,7 @@ import {
 	validateOptionalTypedArray,
 	validateRequiredProperty,
 	validateTypedArray,
+	validateUniqueNameProperty,
 } from "./validation-helpers";
 import { configFileName, formatConfigSnippet } from ".";
 import type { CfWorkerInit } from "../deployment-bundle/worker";
@@ -1058,7 +1059,7 @@ function normalizeAndValidateEnvironment(
 		rawEnv,
 		"preview_urls",
 		isBoolean,
-		true
+		undefined
 	);
 
 	const build = normalizeAndValidateBuild(
@@ -1207,7 +1208,10 @@ function normalizeAndValidateEnvironment(
 			rawEnv,
 			envName,
 			"workflows",
-			validateBindingArray(envName, validateWorkflowBinding),
+			all(
+				validateBindingArray(envName, validateWorkflowBinding),
+				validateUniqueNameProperty
+			),
 			[]
 		),
 		migrations: inheritable(
@@ -2000,10 +2004,75 @@ const validateDurableObjectBinding: ValidatorFn = (
 /**
  * Check that the given field is a valid "workflow" binding object.
  */
-const validateWorkflowBinding: ValidatorFn = (_diagnostics, _field, _value) => {
-	// TODO
+const validateWorkflowBinding: ValidatorFn = (diagnostics, field, value) => {
+	if (typeof value !== "object" || value === null) {
+		diagnostics.errors.push(
+			`"workflows" bindings should be objects, but got ${JSON.stringify(value)}`
+		);
+		return false;
+	}
 
-	return true;
+	let isValid = true;
+
+	if (!isRequiredProperty(value, "binding", "string")) {
+		diagnostics.errors.push(
+			`"${field}" bindings should have a string "binding" field but got ${JSON.stringify(
+				value
+			)}.`
+		);
+		isValid = false;
+	}
+
+	if (!isRequiredProperty(value, "name", "string")) {
+		diagnostics.errors.push(
+			`"${field}" bindings should have a string "name" field but got ${JSON.stringify(
+				value
+			)}.`
+		);
+		isValid = false;
+	} else if (value.name.length > 64) {
+		diagnostics.errors.push(
+			`"${field}" binding "name" field must be 64 characters or less, but got ${value.name.length} characters.`
+		);
+		isValid = false;
+	}
+
+	if (!isRequiredProperty(value, "class_name", "string")) {
+		diagnostics.errors.push(
+			`"${field}" bindings should have a string "class_name" field but got ${JSON.stringify(
+				value
+			)}.`
+		);
+		isValid = false;
+	}
+
+	if (!isOptionalProperty(value, "script_name", "string")) {
+		diagnostics.errors.push(
+			`"${field}" bindings should, optionally, have a string "script_name" field but got ${JSON.stringify(
+				value
+			)}.`
+		);
+		isValid = false;
+	}
+
+	if (!isOptionalProperty(value, "experimental_remote", "boolean")) {
+		diagnostics.errors.push(
+			`"${field}" bindings should, optionally, have a boolean "experimental_remote" field but got ${JSON.stringify(
+				value
+			)}.`
+		);
+		isValid = false;
+	}
+
+	validateAdditionalProperties(diagnostics, field, Object.keys(value), [
+		"binding",
+		"name",
+		"class_name",
+		"script_name",
+		"experimental_remote",
+	]);
+
+	return isValid;
 };
 
 const validateCflogfwdrObject: (env: string) => ValidatorFn =
@@ -2487,19 +2556,62 @@ function validateContainerApp(
 			containerAppOptional.image = resolvedImage;
 			containerAppOptional.image_build_context = resolvedBuildContextPath;
 
-			// Validate rollout related configs
-			if (
-				!isOptionalProperty(
-					containerAppOptional,
-					"rollout_step_percentage",
-					"number"
-				) &&
-				(containerAppOptional.rollout_step_percentage > 100 ||
-					containerAppOptional.rollout_step_percentage < 25)
-			) {
-				diagnostics.errors.push(
-					`"containers.rollout_step_percentage" field should be a number between 25 and 100, but got ${containerAppOptional.rollout_step_percentage}`
-				);
+			// Validate rollout related configuration
+			if (containerAppOptional.rollout_step_percentage !== undefined) {
+				const rolloutStep = containerAppOptional.rollout_step_percentage;
+
+				if (typeof rolloutStep === "number") {
+					// If it's a number, it must be one of the allowed values
+					const allowedSingleValues = [5, 10, 20, 25, 50, 100];
+					if (!allowedSingleValues.includes(rolloutStep)) {
+						diagnostics.errors.push(
+							`"containers.rollout_step_percentage" must be one of [5, 10, 20, 25, 50, 100], but got ${rolloutStep}`
+						);
+					}
+				} else if (Array.isArray(rolloutStep)) {
+					// If it's an array, validate each step and ensure they sum to 100
+					const nonNumber: unknown[] = [];
+					const outOfRange: number[] = [];
+					let index = 0;
+					let ascending = true;
+					for (const step of rolloutStep) {
+						if (typeof step !== "number") {
+							nonNumber.push(step);
+						} else {
+							if (step < 10 || step > 100) {
+								outOfRange.push(step);
+							}
+
+							if (ascending && index > 0 && step < rolloutStep[index - 1]) {
+								diagnostics.errors.push(
+									`"containers.rollout_step_percentage" array elements must be in ascending order, but got "${rolloutStep}"`
+								);
+								ascending = false;
+							}
+							if (index === rolloutStep.length - 1 && step !== 100) {
+								diagnostics.errors.push(
+									`The final step in "containers.rollout_step_percentage" must be 100, but got "${step}"`
+								);
+							}
+							index++;
+						}
+					}
+
+					if (nonNumber.length) {
+						diagnostics.errors.push(
+							`"containers.rollout_step_percentage" array elements must be numbers, but got "${nonNumber.join(", ")}"`
+						);
+					}
+					if (outOfRange.length) {
+						diagnostics.errors.push(
+							`"containers.rollout_step_percentage" array elements must be between 10 and 100, but got "${outOfRange.join(", ")}"`
+						);
+					}
+				} else {
+					diagnostics.errors.push(
+						`"containers.rollout_step_percentage" must be a number or array of numbers, but got "${rolloutStep}"`
+					);
+				}
 			}
 			validateOptionalProperty(
 				diagnostics,
@@ -2509,6 +2621,19 @@ function validateContainerApp(
 				"string",
 				["full_auto", "full_manual", "none"]
 			);
+
+			if (
+				!isOptionalProperty(
+					containerAppOptional,
+					"rollout_active_grace_period",
+					"number"
+				) ||
+				containerAppOptional.rollout_active_grace_period < 0
+			) {
+				diagnostics.errors.push(
+					`"containers.rollout_active_grace_period" field should be a positive number but got "${containerAppOptional.rollout_active_grace_period}"`
+				);
+			}
 			validateOptionalProperty(
 				diagnostics,
 				field,
@@ -2524,6 +2649,22 @@ function validateContainerApp(
 					`"containers.max_instances" field should be a positive number, but got ${containerAppOptional.max_instances}`
 				);
 			}
+
+			// Validate rollout steps vs max_instances
+			if (
+				containerAppOptional.rollout_step_percentage !== undefined &&
+				containerAppOptional.max_instances !== undefined &&
+				Array.isArray(containerAppOptional.rollout_step_percentage)
+			) {
+				const rolloutStepsCount =
+					containerAppOptional.rollout_step_percentage.length;
+				if (rolloutStepsCount > containerAppOptional.max_instances) {
+					diagnostics.errors.push(
+						`"containers.rollout_step_percentage" cannot have more steps (${rolloutStepsCount}) than "max_instances" (${containerAppOptional.max_instances})`
+					);
+				}
+			}
+
 			validateOptionalProperty(
 				diagnostics,
 				field,
@@ -2568,9 +2709,11 @@ function validateContainerApp(
 					"instance_type",
 					"configuration",
 					"constraints",
+					"affinities",
 					"rollout_step_percentage",
 					"rollout_kind",
 					"durable_objects",
+					"rollout_active_grace_period",
 				]
 			);
 			if ("configuration" in containerAppOptional) {
@@ -2791,11 +2934,16 @@ const validateSendEmailBinding: ValidatorFn = (diagnostics, field, value) => {
 		isValid = false;
 	}
 
+	if (!isRemoteValid(value, field, diagnostics)) {
+		isValid = false;
+	}
+
 	validateAdditionalProperties(diagnostics, field, Object.keys(value), [
 		"allowed_destination_addresses",
 		"destination_address",
 		"name",
 		"binding",
+		"experimental_remote",
 	]);
 
 	return isValid;
@@ -3584,9 +3732,14 @@ const validatePipelineBinding: ValidatorFn = (diagnostics, field, value) => {
 		isValid = false;
 	}
 
+	if (!isRemoteValid(value, field, diagnostics)) {
+		isValid = false;
+	}
+
 	validateAdditionalProperties(diagnostics, field, Object.keys(value), [
 		"binding",
 		"pipeline",
+		"experimental_remote",
 	]);
 
 	return isValid;
@@ -3835,7 +3988,7 @@ const validateObservability: ValidatorFn = (diagnostics, field, value) => {
 	let isValid = true;
 
 	/**
-	 * One of observability.enabled or observability.logs.enabled must be defined
+	 * One of observability.enabled, observability.logs.enabled, observability.traces.enabled must be defined
 	 */
 	isValid =
 		validateAtLeastOnePropertyRequired(diagnostics, field, [
@@ -3847,6 +4000,11 @@ const validateObservability: ValidatorFn = (diagnostics, field, value) => {
 			{
 				key: "logs.enabled",
 				value: val.logs?.enabled,
+				type: "boolean",
+			},
+			{
+				key: "traces.enabled",
+				value: val.traces?.enabled,
 				type: "boolean",
 			},
 		]) && isValid;
@@ -3865,10 +4023,20 @@ const validateObservability: ValidatorFn = (diagnostics, field, value) => {
 		isValid;
 
 	isValid =
+		validateOptionalProperty(
+			diagnostics,
+			field,
+			"traces",
+			val.traces,
+			"object"
+		) && isValid;
+
+	isValid =
 		validateAdditionalProperties(diagnostics, field, Object.keys(val), [
 			"enabled",
 			"head_sampling_rate",
 			"logs",
+			"traces",
 		]) && isValid;
 
 	/**
@@ -3903,11 +4071,59 @@ const validateObservability: ValidatorFn = (diagnostics, field, value) => {
 			) && isValid;
 
 		isValid =
+			validateOptionalTypedArray(
+				diagnostics,
+				"logs.destinations",
+				val.logs?.destinations,
+				"string"
+			) && isValid;
+
+		isValid =
 			validateAdditionalProperties(diagnostics, field, Object.keys(val.logs), [
 				"enabled",
 				"head_sampling_rate",
 				"invocation_logs",
+				"destinations",
 			]) && isValid;
+	}
+
+	/**
+	 * Validate the optional nested traces configuration
+	 */
+	if (typeof val.traces === "object") {
+		isValid =
+			validateOptionalProperty(
+				diagnostics,
+				field,
+				"traces.enabled",
+				val.traces.enabled,
+				"boolean"
+			) && isValid;
+
+		isValid =
+			validateOptionalProperty(
+				diagnostics,
+				field,
+				"traces.head_sampling_rate",
+				val.traces.head_sampling_rate,
+				"number"
+			) && isValid;
+
+		isValid =
+			validateOptionalTypedArray(
+				diagnostics,
+				"traces.destinations",
+				val.traces?.destinations,
+				"string"
+			) && isValid;
+
+		isValid =
+			validateAdditionalProperties(
+				diagnostics,
+				field,
+				Object.keys(val.traces),
+				["enabled", "head_sampling_rate", "destinations"]
+			) && isValid;
 	}
 
 	const samplingRate = val?.head_sampling_rate;

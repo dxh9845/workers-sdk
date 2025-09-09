@@ -130,7 +130,7 @@ describe("normalizeAndValidateConfig()", () => {
 			wasm_modules: undefined,
 			data_blobs: undefined,
 			workers_dev: undefined,
-			preview_urls: true,
+			preview_urls: undefined,
 			zone_id: undefined,
 			no_bundle: undefined,
 			minify: undefined,
@@ -1183,6 +1183,7 @@ describe("normalizeAndValidateConfig()", () => {
 				  - Expected \\"upload_source_maps\\" to be of type boolean but got \\"INVALID\\".
 				  - Expected \\"observability.enabled\\" to be of type boolean but got \\"INVALID\\".
 				  - Expected \\"observability.logs.enabled\\" to be of type boolean but got undefined.
+				  - Expected \\"observability.traces.enabled\\" to be of type boolean but got undefined.
 				  - Expected \\"observability.head_sampling_rate\\" to be of type number but got \\"INVALID\\"."
 			`);
 		});
@@ -2436,6 +2437,8 @@ describe("normalizeAndValidateConfig()", () => {
 								image_vars: "invalid",
 								scheduling_policy: "invalid",
 								unknown_field: "value",
+								rollout_active_grace_period: "60s",
+								rollout_step_percentage: "invalid",
 							},
 						],
 					} as unknown as RawConfig,
@@ -2453,11 +2456,40 @@ describe("normalizeAndValidateConfig()", () => {
 					  - Expected \\"containers.image_build_context\\" to be of type string but got 123.
 					  - The image \\"something\\" does not appear to be a valid path to a Dockerfile, or a valid image registry path:
 					    If this is an image registry path, it needs to include at least a tag ':' (e.g: docker.io/httpd:1)
+					  - \\"containers.rollout_step_percentage\\" must be a number or array of numbers, but got \\"invalid\\"
 					  - Expected \\"containers.rollout_kind\\" field to be one of [\\"full_auto\\",\\"full_manual\\",\\"none\\"] but got \\"invalid\\".
+					  - \\"containers.rollout_active_grace_period\\" field should be a positive number but got \\"60s\\"
 					  - Expected \\"containers.max_instances\\" to be of type number but got \\"invalid\\".
 					  - Expected \\"containers.image_vars\\" to be of type object but got \\"invalid\\".
 					  - Expected \\"containers.scheduling_policy\\" field to be one of [\\"regional\\",\\"moon\\",\\"default\\"] but got \\"invalid\\".
 					  - Expected \\"containers.instance_type\\" field to be one of [\\"dev\\",\\"basic\\",\\"standard\\"] but got \\"invalid\\"."
+				`);
+			});
+
+			it("should error if rollout_active_grace_period and rollout_step_percentage are out of range", () => {
+				const { diagnostics } = normalizeAndValidateConfig(
+					{
+						name: "test-worker",
+						containers: [
+							{
+								image: "blah",
+								class_name: "test-class",
+								rollout_active_grace_period: -1,
+								rollout_step_percentage: 9,
+							},
+						],
+					} as unknown as RawConfig,
+					undefined,
+					undefined,
+					{ env: undefined }
+				);
+
+				expect(diagnostics.renderErrors()).toMatchInlineSnapshot(`
+					"Processing wrangler configuration:
+					  - The image \\"blah\\" does not appear to be a valid path to a Dockerfile, or a valid image registry path:
+					    If this is an image registry path, it needs to include at least a tag ':' (e.g: docker.io/httpd:1)
+					  - \\"containers.rollout_step_percentage\\" must be one of [5, 10, 20, 25, 50, 100], but got 9
+					  - \\"containers.rollout_active_grace_period\\" field should be a positive number but got \\"-1\\""
 				`);
 			});
 
@@ -2521,6 +2553,113 @@ describe("normalizeAndValidateConfig()", () => {
 					"Processing wrangler configuration:
 					  - \\"containers.configuration\\" is deprecated. Use top level \\"containers\\" fields instead. \\"configuration.image\\" should be \\"image\\", limits should be set via \\"instance_type\\".
 					  - Unexpected fields found in containers.configuration field: \\"memory\\",\\"invalid_field\\",\\"another_invalid\\""
+				`);
+			});
+
+			it.each([{ value: 25 }, { value: [20, 50, 100] }])(
+				"should accept rollout_step_percentage set to $value",
+				(value) => {
+					const { diagnostics } = normalizeAndValidateConfig(
+						{
+							name: "test-worker",
+							containers: [
+								{
+									class_name: "test-class",
+									image: "docker.io/test:latest",
+									rollout_step_percentage: value.value,
+								},
+							],
+						} as unknown as RawConfig,
+						undefined,
+						undefined,
+						{ env: undefined }
+					);
+
+					expect(diagnostics.hasWarnings()).toBe(false);
+					expect(diagnostics.hasErrors()).toBe(false);
+				}
+			);
+
+			it("should error for invalid rollout_step_percentage number values", () => {
+				const { diagnostics } = normalizeAndValidateConfig(
+					{
+						name: "test-worker",
+						containers: [
+							{
+								class_name: "test-class",
+								image: "docker.io/test:latest",
+								rollout_step_percentage: 15,
+							},
+						],
+					} as unknown as RawConfig,
+					undefined,
+					undefined,
+					{ env: undefined }
+				);
+
+				expect(diagnostics.hasWarnings()).toBe(false);
+				expect(diagnostics.renderErrors()).toMatchInlineSnapshot(`
+					"Processing wrangler configuration:
+					  - \\"containers.rollout_step_percentage\\" must be one of [5, 10, 20, 25, 50, 100], but got 15"
+				`);
+			});
+
+			it("should error for rollout_step_percentage array with invalid items", () => {
+				const { diagnostics } = normalizeAndValidateConfig(
+					{
+						name: "test-worker",
+						containers: [
+							{
+								class_name: "test-class",
+								image: "docker.io/test:latest",
+								rollout_step_percentage: [20, 30, 1, 101],
+							},
+						],
+					} as unknown as RawConfig,
+					undefined,
+					undefined,
+					{ env: undefined }
+				);
+
+				expect(diagnostics.hasWarnings()).toBe(false);
+				expect(diagnostics.renderErrors()).toMatchInlineSnapshot(`
+					"Processing wrangler configuration:
+					  - \\"containers.rollout_step_percentage\\" array elements must be in ascending order, but got \\"20,30,1,101\\"
+					  - The final step in \\"containers.rollout_step_percentage\\" must be 100, but got \\"101\\"
+					  - \\"containers.rollout_step_percentage\\" array elements must be between 10 and 100, but got \\"1, 101\\""
+				`);
+			});
+
+			it("should error when rollout_step_percentage has more steps than max_instances", () => {
+				const { diagnostics } = normalizeAndValidateConfig(
+					{
+						name: "test-worker",
+						containers: [
+							{
+								name: "test-container",
+								class_name: "TestClass",
+								image: "registry.cloudflare.com/test:latest",
+								max_instances: 2,
+								rollout_step_percentage: [10, 50, 75, 100],
+							},
+						],
+						durable_objects: {
+							bindings: [
+								{
+									name: "TEST_DO",
+									class_name: "TestClass",
+								},
+							],
+						},
+					} as unknown as RawConfig,
+					undefined,
+					undefined,
+					{ env: undefined }
+				);
+
+				expect(diagnostics.renderErrors()).toMatchInlineSnapshot(`
+					"Processing wrangler configuration:
+					  - \\"containers.rollout_step_percentage\\" cannot have more steps (4) than \\"max_instances\\" (2)"
 				`);
 			});
 		});
@@ -2625,6 +2764,7 @@ describe("normalizeAndValidateConfig()", () => {
 						RESOURCES_PROVISION: true,
 						MULTIWORKER: false,
 						REMOTE_BINDINGS: false,
+						DEPLOY_REMOTE_DIFF_CHECK: false,
 					},
 					() =>
 						normalizeAndValidateConfig(
@@ -2781,6 +2921,7 @@ describe("normalizeAndValidateConfig()", () => {
 						RESOURCES_PROVISION: true,
 						MULTIWORKER: false,
 						REMOTE_BINDINGS: false,
+						DEPLOY_REMOTE_DIFF_CHECK: false,
 					},
 					() =>
 						normalizeAndValidateConfig(
@@ -3119,6 +3260,7 @@ describe("normalizeAndValidateConfig()", () => {
 						RESOURCES_PROVISION: true,
 						MULTIWORKER: false,
 						REMOTE_BINDINGS: false,
+						DEPLOY_REMOTE_DIFF_CHECK: false,
 					},
 					() =>
 						normalizeAndValidateConfig(
@@ -6158,7 +6300,7 @@ describe("normalizeAndValidateConfig()", () => {
 				expect(diagnostics.hasErrors()).toBe(true);
 				expect(diagnostics.renderErrors()).toMatchInlineSnapshot(`
 					"Processing wrangler configuration:
-					  - \\"observability.enabled\\" or \\"observability.logs.enabled\\" is required.
+					  - \\"observability.enabled\\" or \\"observability.logs.enabled\\" or \\"observability.traces.enabled\\" is required.
 					  - Expected \\"observability.head_sampling_rate\\" to be of type number but got true."
 				`);
 			});
@@ -6212,6 +6354,29 @@ describe("normalizeAndValidateConfig()", () => {
 				expect(diagnostics.hasErrors()).toBe(false);
 			});
 
+			it("should not error on nested [observability.traces] config only", () => {
+				const { diagnostics } = normalizeAndValidateConfig(
+					{
+						observability: {
+							traces: {
+								enabled: true,
+							},
+						},
+					} as unknown as RawConfig,
+					undefined,
+					undefined,
+					{ env: undefined }
+				);
+
+				expect(diagnostics.hasWarnings()).toBe(false);
+				expect(diagnostics.renderWarnings()).toMatchInlineSnapshot(`
+					"Processing wrangler configuration:
+					"
+				`);
+
+				expect(diagnostics.hasErrors()).toBe(false);
+			});
+
 			it("should not error on mixed observability config", () => {
 				const { diagnostics } = normalizeAndValidateConfig(
 					{
@@ -6219,6 +6384,9 @@ describe("normalizeAndValidateConfig()", () => {
 							enabled: true,
 							logs: {
 								invocation_logs: false,
+							},
+							traces: {
+								destinations: [],
 							},
 						},
 					} as unknown as RawConfig,
@@ -6643,6 +6811,93 @@ describe("experimental_readRawConfig()", () => {
 			});
 		}
 	);
+});
+
+describe("BOM (Byte Order Marker) handling", () => {
+	runInTempDir();
+
+	it("should remove UTF-8 BOM from TOML config files", () => {
+		const configContent = `name = "test-worker"
+compatibility_date = "2022-01-12"`;
+
+		fs.writeFileSync(
+			"wrangler.toml",
+			Buffer.concat([
+				Buffer.from([0xef, 0xbb, 0xbf]),
+				Buffer.from(configContent, "utf-8"),
+			])
+		);
+
+		const config = readConfig({ config: "wrangler.toml" });
+		expect(config.name).toBe("test-worker");
+		expect(config.compatibility_date).toBe("2022-01-12");
+	});
+
+	it("should remove UTF-8 BOM from JSON config files", () => {
+		const configContent = `{
+	"name": "test-worker",
+	"compatibility_date": "2022-01-12"
+}`;
+
+		fs.writeFileSync(
+			"wrangler.json",
+			Buffer.concat([
+				Buffer.from([0xef, 0xbb, 0xbf]),
+				Buffer.from(configContent, "utf-8"),
+			])
+		);
+
+		const config = readConfig({ config: "wrangler.json" });
+		expect(config.name).toBe("test-worker");
+		expect(config.compatibility_date).toBe("2022-01-12");
+	});
+
+	it("should error on UTF-16 BE BOM", () => {
+		const bomBytes = Buffer.from([0xfe, 0xff]);
+		const configContent = Buffer.from('{"name": "test"}', "utf-8");
+		fs.writeFileSync("wrangler.json", Buffer.concat([bomBytes, configContent]));
+
+		expect(() => readConfig({ config: "wrangler.json" })).toThrow(
+			"Configuration file contains UTF-16 BE byte order marker"
+		);
+	});
+
+	it("should error on UTF-16 LE BOM", () => {
+		const bomBytes = Buffer.from([0xff, 0xfe]);
+		const configContent = Buffer.from('{"name": "test"}', "utf-8");
+		fs.writeFileSync("wrangler.json", Buffer.concat([bomBytes, configContent]));
+
+		expect(() => readConfig({ config: "wrangler.json" })).toThrow(
+			"Configuration file contains UTF-16 LE byte order marker"
+		);
+	});
+
+	it("should error on UTF-32 BE BOM", () => {
+		const bomBytes = Buffer.from([0x00, 0x00, 0xfe, 0xff]);
+		const configContent = Buffer.from('{"name": "test"}', "utf-8");
+		fs.writeFileSync("wrangler.json", Buffer.concat([bomBytes, configContent]));
+
+		expect(() => readConfig({ config: "wrangler.json" })).toThrow(
+			"Configuration file contains UTF-32 BE byte order marker"
+		);
+	});
+
+	it("should error on UTF-32 LE BOM", () => {
+		const bomBytes = Buffer.from([0xff, 0xfe, 0x00, 0x00]);
+		const configContent = Buffer.from('{"name": "test"}', "utf-8");
+		fs.writeFileSync("wrangler.json", Buffer.concat([bomBytes, configContent]));
+
+		expect(() => readConfig({ config: "wrangler.json" })).toThrow(
+			"Configuration file contains UTF-32 LE byte order marker"
+		);
+	});
+
+	it("should handle files without BOM normally", () => {
+		writeWranglerConfig({ name: "no-bom-test" });
+
+		const config = readConfig({ config: "wrangler.toml" });
+		expect(config.name).toBe("no-bom-test");
+	});
 });
 
 function normalizePath(text: string): string {

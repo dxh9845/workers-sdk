@@ -29,7 +29,7 @@ describe("getNormalizedContainerOptions", () => {
 			},
 		} as Partial<Config> as Config;
 
-		const result = await getNormalizedContainerOptions(config);
+		const result = await getNormalizedContainerOptions(config, {});
 		expect(result).toEqual([]);
 	});
 
@@ -45,7 +45,7 @@ describe("getNormalizedContainerOptions", () => {
 			},
 		} as Partial<Config> as Config;
 
-		const result = await getNormalizedContainerOptions(config);
+		const result = await getNormalizedContainerOptions(config, {});
 		expect(result).toEqual([]);
 	});
 
@@ -67,10 +67,10 @@ describe("getNormalizedContainerOptions", () => {
 			},
 		} as Partial<Config> as Config;
 
-		await expect(getNormalizedContainerOptions(config)).rejects.toThrow(
+		await expect(getNormalizedContainerOptions(config, {})).rejects.toThrow(
 			UserError
 		);
-		await expect(getNormalizedContainerOptions(config)).rejects.toThrow(
+		await expect(getNormalizedContainerOptions(config, {})).rejects.toThrow(
 			"The container class_name TestContainer does not match any durable object class_name defined in your Wrangler config file"
 		);
 	});
@@ -99,17 +99,105 @@ describe("getNormalizedContainerOptions", () => {
 			},
 		} as Partial<Config> as Config;
 
-		await expect(getNormalizedContainerOptions(config)).rejects.toThrow(
+		await expect(getNormalizedContainerOptions(config, {})).rejects.toThrow(
 			UserError
 		);
 		await expect(
-			getNormalizedContainerOptions(config)
+			getNormalizedContainerOptions(config, {})
 		).rejects.toThrowErrorMatchingInlineSnapshot(
 			`[Error: The container test-container is referencing the durable object TestContainer, which appears to be defined on the other-script Worker instead (via the 'script_name' field). You cannot configure a container on a Durable Object that is defined in another Worker.]`
 		);
 	});
 
 	it("should normalize and set defaults for container with dockerfile", async () => {
+		writeFileSync("Dockerfile", "FROM scratch");
+
+		const config: Config = {
+			name: "test-worker",
+			configPath: "./wrangler.toml",
+			topLevelName: "test-worker",
+			containers: [
+				{
+					class_name: "TestContainer",
+					image: path.resolve("./Dockerfile"),
+					name: "test-container",
+					max_instances: 3,
+				},
+			],
+			durable_objects: {
+				bindings: [
+					{
+						name: "TEST_DO",
+						class_name: "TestContainer",
+					},
+				],
+			},
+		} as Partial<Config> as Config;
+
+		const result = await getNormalizedContainerOptions(config, {});
+
+		expect(result).toHaveLength(1);
+		expect(result[0]).toMatchObject({
+			name: "test-container",
+			class_name: "TestContainer",
+			max_instances: 3,
+			scheduling_policy: "default",
+			rollout_step_percentage: [10, 100],
+			rollout_kind: "full_auto",
+			instance_type: "dev",
+			dockerfile: expect.stringMatching(/[/\\]Dockerfile$/),
+			image_build_context: expect.stringMatching(/[/\\][^/\\]*$/),
+			image_vars: undefined,
+			constraints: { tier: 1 },
+			observability: {
+				logs_enabled: false,
+			},
+		});
+	});
+
+	it("should normalize and set defaults for container with registry image", async () => {
+		const config: Config = {
+			name: "test-worker",
+			configPath: "/test/wrangler.toml",
+			topLevelName: "test-worker",
+			containers: [
+				{
+					class_name: "TestContainer",
+					image: `${getCloudflareContainerRegistry()}/test:latest`,
+					name: "test-container",
+					max_instances: 3,
+				},
+			],
+			durable_objects: {
+				bindings: [
+					{
+						name: "TEST_DO",
+						class_name: "TestContainer",
+					},
+				],
+			},
+		} as Partial<Config> as Config;
+
+		const result = await getNormalizedContainerOptions(config, {});
+
+		expect(result).toHaveLength(1);
+		expect(result[0]).toMatchObject({
+			name: "test-container",
+			class_name: "TestContainer",
+			max_instances: 3,
+			scheduling_policy: "default",
+			rollout_step_percentage: [10, 100],
+			rollout_kind: "full_auto",
+			instance_type: "dev",
+			image_uri: "registry.cloudflare.com/some-account-id/test:latest",
+			constraints: { tier: 1 },
+			observability: {
+				logs_enabled: false,
+			},
+		});
+	});
+
+	it("should default max_instances and rollout_step_percentage accordingly", async () => {
 		writeFileSync("Dockerfile", "FROM scratch");
 
 		const config: Config = {
@@ -133,65 +221,14 @@ describe("getNormalizedContainerOptions", () => {
 			},
 		} as Partial<Config> as Config;
 
-		const result = await getNormalizedContainerOptions(config);
+		const result = await getNormalizedContainerOptions(config, {});
 
 		expect(result).toHaveLength(1);
 		expect(result[0]).toMatchObject({
 			name: "test-container",
 			class_name: "TestContainer",
-			max_instances: 0,
-			scheduling_policy: "default",
-			rollout_step_percentage: 25,
-			rollout_kind: "full_auto",
-			instance_type: "dev",
-			dockerfile: expect.stringMatching(/[/\\]Dockerfile$/),
-			image_build_context: expect.stringMatching(/[/\\][^/\\]*$/),
-			image_vars: undefined,
-			constraints: { tier: 1 },
-			observability: {
-				logs_enabled: false,
-			},
-		});
-	});
-
-	it("should normalize and set defaults for container with registry image", async () => {
-		const config: Config = {
-			name: "test-worker",
-			configPath: "/test/wrangler.toml",
-			topLevelName: "test-worker",
-			containers: [
-				{
-					class_name: "TestContainer",
-					image: `${getCloudflareContainerRegistry()}/test:latest`,
-					name: "test-container",
-				},
-			],
-			durable_objects: {
-				bindings: [
-					{
-						name: "TEST_DO",
-						class_name: "TestContainer",
-					},
-				],
-			},
-		} as Partial<Config> as Config;
-
-		const result = await getNormalizedContainerOptions(config);
-
-		expect(result).toHaveLength(1);
-		expect(result[0]).toMatchObject({
-			name: "test-container",
-			class_name: "TestContainer",
-			max_instances: 0,
-			scheduling_policy: "default",
-			rollout_step_percentage: 25,
-			rollout_kind: "full_auto",
-			instance_type: "dev",
-			image_uri: "registry.cloudflare.com/some-account-id/test:latest",
-			constraints: { tier: 1 },
-			observability: {
-				logs_enabled: false,
-			},
+			max_instances: 1,
+			rollout_step_percentage: 100,
 		});
 	});
 
@@ -207,6 +244,7 @@ describe("getNormalizedContainerOptions", () => {
 					name: "test-container",
 					class_name: "TestContainer",
 					image: "registry.example.com/test:latest",
+					max_instances: 3,
 					configuration: {
 						disk: { size_mb: 5000 },
 						memory_mib: 1024,
@@ -224,14 +262,14 @@ describe("getNormalizedContainerOptions", () => {
 			},
 		} as Partial<Config> as Config;
 
-		const result = await getNormalizedContainerOptions(config);
+		const result = await getNormalizedContainerOptions(config, {});
 		expect(result).toHaveLength(1);
 		expect(result[0]).toMatchObject({
 			name: "test-container",
 			class_name: "TestContainer",
-			max_instances: 0,
+			max_instances: 3,
 			scheduling_policy: "default",
-			rollout_step_percentage: 25,
+			rollout_step_percentage: [10, 100],
 			rollout_kind: "full_auto",
 			disk_bytes: 5_000_000_000, // 5000 MB in bytes
 			memory_mib: 1024,
@@ -253,6 +291,7 @@ describe("getNormalizedContainerOptions", () => {
 					name: "test-container",
 					class_name: "TestContainer",
 					image: "registry.example.com/test:latest",
+					max_instances: 3,
 					instance_type: {
 						disk_mb: 5000,
 						memory_mib: 1024,
@@ -270,14 +309,14 @@ describe("getNormalizedContainerOptions", () => {
 			},
 		} as Partial<Config> as Config;
 
-		const result = await getNormalizedContainerOptions(config);
+		const result = await getNormalizedContainerOptions(config, {});
 		expect(result).toHaveLength(1);
 		expect(result[0]).toMatchObject({
 			name: "test-container",
 			class_name: "TestContainer",
-			max_instances: 0,
+			max_instances: 3,
 			scheduling_policy: "default",
-			rollout_step_percentage: 25,
+			rollout_step_percentage: [10, 100],
 			rollout_kind: "full_auto",
 			disk_bytes: 5_000_000_000, // 5000 MB in bytes
 			memory_mib: 1024,
@@ -298,6 +337,7 @@ describe("getNormalizedContainerOptions", () => {
 					name: "test-container",
 					class_name: "TestContainer",
 					image: "registry.example.com/test:latest",
+					max_instances: 3,
 					instance_type: {
 						vcpu: 2,
 					},
@@ -313,14 +353,14 @@ describe("getNormalizedContainerOptions", () => {
 			},
 		} as Partial<Config> as Config;
 
-		const result = await getNormalizedContainerOptions(config);
+		const result = await getNormalizedContainerOptions(config, {});
 		expect(result).toHaveLength(1);
 		expect(result[0]).toMatchObject({
 			name: "test-container",
 			class_name: "TestContainer",
-			max_instances: 0,
+			max_instances: 3,
 			scheduling_policy: "default",
-			rollout_step_percentage: 25,
+			rollout_step_percentage: [10, 100],
 			rollout_kind: "full_auto",
 			disk_bytes: 2_000_000_000, // 2000 MB in bytes
 			memory_mib: 256,
@@ -342,6 +382,7 @@ describe("getNormalizedContainerOptions", () => {
 					image: "registry.example.com/test:latest",
 					instance_type: "standard",
 					name: "test-container",
+					max_instances: 3,
 				},
 			],
 			durable_objects: {
@@ -354,14 +395,14 @@ describe("getNormalizedContainerOptions", () => {
 			},
 		} as Partial<Config> as Config;
 
-		const result = await getNormalizedContainerOptions(config);
+		const result = await getNormalizedContainerOptions(config, {});
 		expect(result).toHaveLength(1);
 		expect(result[0]).toMatchObject({
 			name: "test-container",
 			class_name: "TestContainer",
-			max_instances: 0,
+			max_instances: 3,
 			scheduling_policy: "default",
-			rollout_step_percentage: 25,
+			rollout_step_percentage: [10, 100],
 			rollout_kind: "full_auto",
 			instance_type: "standard",
 			image_uri: "registry.example.com/test:latest",
@@ -387,11 +428,15 @@ describe("getNormalizedContainerOptions", () => {
 					scheduling_policy: "regional",
 					rollout_step_percentage: 50,
 					rollout_kind: "full_manual",
+					rollout_active_grace_period: 600,
 					instance_type: "basic",
 					constraints: {
 						tier: 2,
 						regions: ["us-east-1", "us-west-2"],
 						cities: ["NYC", "SF"],
+					},
+					affinities: {
+						hardware_generation: "highest-overall-performance",
 					},
 				},
 			],
@@ -405,7 +450,7 @@ describe("getNormalizedContainerOptions", () => {
 			},
 		} as Partial<Config> as Config;
 
-		const result = await getNormalizedContainerOptions(config);
+		const result = await getNormalizedContainerOptions(config, {});
 		expect(result).toHaveLength(1);
 		expect(result[0]).toEqual({
 			name: "custom-name",
@@ -414,12 +459,16 @@ describe("getNormalizedContainerOptions", () => {
 			scheduling_policy: "regional",
 			rollout_step_percentage: 50,
 			rollout_kind: "full_manual",
+			rollout_active_grace_period: 600,
 			instance_type: "basic",
 			image_uri: "registry.example.com/test:latest",
 			constraints: {
 				tier: 2,
 				regions: ["US-EAST-1", "US-WEST-2"],
 				cities: ["nyc", "sf"],
+			},
+			affinities: {
+				hardware_generation: "highest-overall-performance",
 			},
 			observability: {
 				logs_enabled: true,
@@ -440,6 +489,7 @@ describe("getNormalizedContainerOptions", () => {
 					class_name: "TestContainer",
 					image: path.resolve("./nested/Dockerfile"),
 					name: "test-container",
+					max_instances: 3,
 				},
 			],
 			durable_objects: {
@@ -452,14 +502,14 @@ describe("getNormalizedContainerOptions", () => {
 			},
 		} as Partial<Config> as Config;
 
-		const result = await getNormalizedContainerOptions(config);
+		const result = await getNormalizedContainerOptions(config, {});
 		expect(result).toHaveLength(1);
 		expect(result[0]).toMatchObject({
 			name: "test-container",
 			class_name: "TestContainer",
-			max_instances: 0,
+			max_instances: 3,
 			scheduling_policy: "default",
-			rollout_step_percentage: 25,
+			rollout_step_percentage: [10, 100],
 			rollout_kind: "full_auto",
 			instance_type: "dev",
 			dockerfile: expect.stringMatching(/[/\\]nested[/\\]Dockerfile$/),
@@ -504,7 +554,7 @@ describe("getNormalizedContainerOptions", () => {
 			},
 		} as Partial<Config> as Config;
 
-		const result = await getNormalizedContainerOptions(config);
+		const result = await getNormalizedContainerOptions(config, {});
 
 		expect(result).toHaveLength(2);
 		expect(result[0].class_name).toBe("Container1");
@@ -535,11 +585,69 @@ describe("getNormalizedContainerOptions", () => {
 			},
 		} as Partial<Config> as Config;
 
-		const result = await getNormalizedContainerOptions(config);
+		const result = await getNormalizedContainerOptions(config, {});
 		expect(result).toHaveLength(1);
 		// Check that it has dockerfile properties (not image_uri)
 		expect(result[0]).toHaveProperty("dockerfile");
 		expect(result[0]).toHaveProperty("image_build_context");
 		expect(result[0]).not.toHaveProperty("image_uri");
+	});
+
+	it("should be able to specify all tiers", async () => {
+		writeFileSync("Dockerfile", "FROM scratch");
+		const config: Config = {
+			name: "test-worker",
+			containers: [
+				{
+					class_name: "TestContainer",
+					image: `${getCloudflareContainerRegistry()}/test:latest`,
+					name: "test-container",
+					constraints: {
+						tier: -1,
+					},
+				},
+			],
+			durable_objects: {
+				bindings: [
+					{
+						name: "TEST_DO",
+						class_name: "TestContainer",
+					},
+				],
+			},
+		} as Partial<Config> as Config;
+
+		const result = await getNormalizedContainerOptions(config, {});
+		expect(result).toHaveLength(1);
+		expect(result[0].constraints.tier).toBeUndefined();
+	});
+
+	it("should default rollout_step_percentage to 100 when max_instances is 1", async () => {
+		const config: Config = {
+			name: "test-worker",
+			configPath: "/test/wrangler.toml",
+			userConfigPath: "/test/wrangler.toml",
+			topLevelName: "test-worker",
+			containers: [
+				{
+					class_name: "TestContainer",
+					image: `${getCloudflareContainerRegistry()}/test:latest`,
+					name: "test-container",
+					max_instances: 1,
+				},
+			],
+			durable_objects: {
+				bindings: [
+					{
+						name: "TEST_DO",
+						class_name: "TestContainer",
+					},
+				],
+			},
+		} as Partial<Config> as Config;
+
+		const result = await getNormalizedContainerOptions(config, {});
+		expect(result).toHaveLength(1);
+		expect(result[0].rollout_step_percentage).toBe(100);
 	});
 });

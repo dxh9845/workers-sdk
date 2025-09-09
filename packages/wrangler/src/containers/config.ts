@@ -9,11 +9,37 @@ import {
 import { UserError } from "../errors";
 import { getAccountId } from "../user";
 import type { Config } from "../config";
+import type { ContainerApp } from "../config/environment";
 import type {
+	ApplicationAffinities,
+	ApplicationAffinityColocation,
 	ContainerNormalizedConfig,
 	InstanceTypeOrLimits,
 	SharedContainerConfig,
 } from "@cloudflare/containers-shared";
+import type { ApplicationAffinityHardwareGeneration } from "@cloudflare/containers-shared/src/client/models/ApplicationAffinityHardwareGeneration";
+
+/**
+ * Perform type conversion of affinities so that they can be fed to the API.
+ */
+function convertContainerAffinitiesForApi(
+	container: ContainerApp
+): ApplicationAffinities | undefined {
+	if (container.affinities === undefined) {
+		return undefined;
+	}
+
+	const affinities: ApplicationAffinities = {
+		colocation: container.affinities?.colocation as
+			| ApplicationAffinityColocation
+			| undefined,
+		hardware_generation: container.affinities?.hardware_generation as
+			| ApplicationAffinityHardwareGeneration
+			| undefined,
+	};
+
+	return affinities;
+}
 
 /**
  * This normalises config into an intermediate shape for building or pulling.
@@ -21,7 +47,12 @@ import type {
  * we want to revert to the default rather than inheriting from the prev deployment
  */
 export const getNormalizedContainerOptions = async (
-	config: Config
+	config: Config,
+	args: {
+		/** set by args.containersRollout */
+		containersRollout?: "gradual" | "immediate";
+		dryRun?: boolean;
+	}
 ): Promise<ContainerNormalizedConfig[]> => {
 	if (!config.containers || config.containers.length === 0) {
 		return [];
@@ -51,14 +82,23 @@ export const getNormalizedContainerOptions = async (
 			);
 		}
 
+		const rolloutStepPercentageFallback =
+			(container.max_instances ?? 0) < 2 ? 100 : [10, 100];
+
 		const shared: Omit<SharedContainerConfig, "disk_size" | "instance_type"> = {
 			name: container.name,
 			class_name: container.class_name,
-			max_instances: container.max_instances ?? 0,
+			max_instances: container.max_instances ?? 1,
 			scheduling_policy: (container.scheduling_policy ??
 				SchedulingPolicy.DEFAULT) as SchedulingPolicy,
 			constraints: {
-				tier: container.constraints?.tier ?? 1,
+				// if the tier is -1, then we allow all tiers
+				// Wrangler will default an input value to 1. The API, however, will
+				// treat an undefined value to mean no constraints on tier (i.e. "all tiers")
+				tier:
+					container.constraints?.tier === -1
+						? undefined
+						: container.constraints?.tier ?? 1,
 				regions: container.constraints?.regions?.map((region) =>
 					region.toUpperCase()
 				),
@@ -66,8 +106,13 @@ export const getNormalizedContainerOptions = async (
 					city.toLowerCase()
 				),
 			},
-			rollout_step_percentage: container.rollout_step_percentage ?? 25,
+			affinities: convertContainerAffinitiesForApi(container),
+			rollout_step_percentage:
+				args?.containersRollout === "immediate"
+					? 100
+					: container.rollout_step_percentage ?? rolloutStepPercentageFallback,
 			rollout_kind: container.rollout_kind ?? "full_auto",
+			rollout_active_grace_period: container.rollout_active_grace_period ?? 0,
 			observability: {
 				logs_enabled:
 					config.observability?.logs?.enabled ??
@@ -128,11 +173,12 @@ export const getNormalizedContainerOptions = async (
 				image_vars: container.image_vars,
 			});
 		} else {
-			const accountId = await getAccountId(config);
 			normalizedContainers.push({
 				...shared,
 				...instanceTypeOrLimits,
-				image_uri: resolveImageName(accountId, container.image), // if it is not a dockerfile, it must be an image uri or have thrown an error
+				image_uri: args.dryRun
+					? container.image
+					: resolveImageName(await getAccountId(config), container.image), // if it is not a dockerfile, it must be an image uri or have thrown an error
 			});
 		}
 	}

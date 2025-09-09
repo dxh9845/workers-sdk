@@ -21,7 +21,8 @@ export async function performApiFetch(
 	resource: string,
 	init: RequestInit = {},
 	queryParams?: URLSearchParams,
-	abortSignal?: AbortSignal
+	abortSignal?: AbortSignal,
+	apiToken?: ApiCredentials
 ) {
 	const method = init.method ?? "GET";
 	assert(
@@ -29,7 +30,7 @@ export async function performApiFetch(
 		`CF API fetch - resource path must start with a "/" but got "${resource}"`
 	);
 	await requireLoggedIn(complianceConfig);
-	const apiToken = requireApiToken();
+	apiToken ??= requireApiToken();
 	const headers = cloneHeaders(new Headers(init.headers));
 	addAuthorizationHeaderIfUnspecified(headers, apiToken);
 	addUserAgent(headers);
@@ -39,9 +40,7 @@ export async function performApiFetch(
 		`-- START CF API REQUEST: ${method} ${getCloudflareApiBaseUrl(complianceConfig)}${resource}`
 	);
 	logger.debugWithSanitization("QUERY STRING:", queryString);
-	const logHeaders = cloneHeaders(headers);
-	logHeaders.delete("Authorization");
-	logger.debugWithSanitization("HEADERS:", JSON.stringify(logHeaders, null, 2));
+	logHeaders(headers);
 
 	logger.debugWithSanitization("INIT:", JSON.stringify({ ...init }, null, 2));
 	if (init.body instanceof FormData) {
@@ -64,6 +63,15 @@ export async function performApiFetch(
 	);
 }
 
+function logHeaders(headers: Headers) {
+	headers = cloneHeaders(headers);
+	headers.delete("Authorization");
+	logger.debugWithSanitization(
+		"HEADERS:",
+		JSON.stringify(Object.fromEntries(headers), null, 2)
+	);
+}
+
 /**
  * Make a fetch request to the Cloudflare API.
  *
@@ -78,7 +86,8 @@ export async function fetchInternal<ResponseType>(
 	resource: string,
 	init: RequestInit = {},
 	queryParams?: URLSearchParams,
-	abortSignal?: AbortSignal
+	abortSignal?: AbortSignal,
+	apiToken?: ApiCredentials
 ): Promise<ResponseType> {
 	const method = init.method ?? "GET";
 	const response = await performApiFetch(
@@ -86,7 +95,8 @@ export async function fetchInternal<ResponseType>(
 		resource,
 		init,
 		queryParams,
-		abortSignal
+		abortSignal,
+		apiToken
 	);
 	const jsonText = await response.text();
 	logger.debug(
@@ -94,9 +104,7 @@ export async function fetchInternal<ResponseType>(
 		response.statusText,
 		response.status
 	);
-	const logHeaders = cloneHeaders(response.headers);
-	logHeaders.delete("Authorization");
-	logger.debugWithSanitization("HEADERS:", JSON.stringify(logHeaders, null, 2));
+	logHeaders(response.headers);
 	logger.debugWithSanitization("RESPONSE:", jsonText);
 	logger.debug("-- END CF API RESPONSE");
 

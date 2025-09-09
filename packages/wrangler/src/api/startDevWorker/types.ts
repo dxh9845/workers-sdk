@@ -10,6 +10,7 @@ import type {
 	ZoneNameRoute,
 } from "../../config/environment";
 import type {
+	CfAIBinding,
 	CfAnalyticsEngineDataset,
 	CfD1Database,
 	CfDispatchNamespace,
@@ -32,7 +33,6 @@ import type {
 	CfVectorize,
 	CfWorkflow,
 } from "../../deployment-bundle/worker";
-import type { WorkerRegistry } from "../../dev-registry";
 import type { CfAccount } from "../../dev/create-worker-preview";
 import type { EsbuildBundle } from "../../dev/use-esbuild";
 import type { ConfigController } from "./ConfigController";
@@ -178,12 +178,9 @@ export interface StartDevWorkerInput {
 		/** An undici MockAgent to declaratively mock fetch calls to particular resources. */
 		mockFetch?: undici.MockAgent;
 
-		/** Describes the registry of other Workers running locally */
-		registry?: WorkerRegistry | null;
-
 		testScheduled?: boolean;
 
-		/** Whether to use Vectorize mixed mode -- the worker is run locally but accesses to Vectorize are made remotely */
+		/** Whether to use Vectorize as a remote binding -- the worker is run locally but accesses to Vectorize are made remotely */
 		bindVectorizeToProd?: boolean;
 
 		/** Whether to use Images local mode -- this is lower fidelity, but doesn't require network access */
@@ -198,6 +195,9 @@ export interface StartDevWorkerInput {
 		containerBuildId?: string;
 		/** Whether to build and connect to containers during local dev. Requires Docker daemon to be running. Defaults to true. */
 		enableContainers?: boolean;
+
+		/** Path to the dev registry directory */
+		registry?: string;
 
 		/** Path to the docker executable. Defaults to 'docker' */
 		dockerPath?: string;
@@ -282,7 +282,7 @@ export type Binding =
 	| { type: "wasm_module"; source: BinaryFile }
 	| { type: "text_blob"; source: File }
 	| { type: "browser" }
-	| { type: "ai" }
+	| ({ type: "ai" } & BindingOmit<CfAIBinding>)
 	| { type: "images" }
 	| { type: "version_metadata" }
 	| { type: "data_blob"; source: BinaryFile }

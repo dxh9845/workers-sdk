@@ -8,7 +8,7 @@ import PQueue from "p-queue";
 import { Response } from "undici";
 import { syncAssets } from "../assets";
 import { fetchListResult, fetchResult } from "../cfetch";
-import { deployContainers, maybeBuildContainer } from "../cloudchamber/deploy";
+import { buildContainer, deployContainers } from "../cloudchamber/deploy";
 import { configFileName, formatConfigSnippet } from "../config";
 import { getNormalizedContainerOptions } from "../containers/config";
 import { getBindings, provisionBindings } from "../deployment-bundle/bindings";
@@ -39,7 +39,6 @@ import {
 	postConsumer,
 	putConsumer,
 	putConsumerById,
-	putQueue,
 } from "../queues/client";
 import { syncWorkersSite } from "../sites";
 import {
@@ -48,6 +47,7 @@ import {
 } from "../sourcemap";
 import triggersDeploy from "../triggers/deploy";
 import { formatCompatibilityDate } from "../utils/compatibility-date";
+import { downloadWorkerConfig } from "../utils/download-worker-config";
 import { helpIfErrorIsSizeOrScriptStartup } from "../utils/friendly-validator-errors";
 import { printBindings } from "../utils/print-bindings";
 import { retryOnAPIFailure } from "../utils/retry";
@@ -57,6 +57,7 @@ import {
 } from "../versions/api";
 import { confirmLatestDeploymentOverwrite } from "../versions/deploy";
 import { getZoneForRoute } from "../zones";
+import { getRemoteConfigDiff } from "./config-diffs";
 import type { AssetsOptions } from "../assets";
 import type { Config } from "../config";
 import type {
@@ -72,7 +73,7 @@ import type {
 	CfWorkerInit,
 } from "../deployment-bundle/worker";
 import type { ComplianceConfig } from "../environment-variables/misc-variables";
-import type { PostQueueBody, PostTypedConsumerBody } from "../queues/client";
+import type { PostTypedConsumerBody } from "../queues/client";
 import type { LegacyAssetPaths } from "../sites";
 import type { RetrieveSourceMapFunction } from "../sourcemap";
 import type { ApiVersion, Percentage, VersionId } from "../versions/types";
@@ -94,6 +95,7 @@ type Props = {
 	alias: Record<string, string> | undefined;
 	triggers: string[] | undefined;
 	routes: string[] | undefined;
+	domains: string[] | undefined;
 	legacyEnv: boolean | undefined;
 	jsxFactory: string | undefined;
 	jsxFragment: string | undefined;
@@ -112,6 +114,7 @@ type Props = {
 	dispatchNamespace: string | undefined;
 	experimentalAutoCreate: boolean;
 	metafile: string | boolean | undefined;
+	containersRollout: "immediate" | "gradual" | undefined;
 };
 
 export type RouteObject = ZoneIdRoute | ZoneNameRoute | CustomDomainRoute;
@@ -350,16 +353,25 @@ export default async function deploy(props: Props): Promise<{
 	targets?: string[];
 }> {
 	// TODO: warn if git/hg has uncommitted changes
-	const { config, accountId, name } = props;
+	const { config, accountId, name, entry } = props;
 	let workerTag: string | null = null;
 	let versionId: string | null = null;
 
 	let workerExists: boolean = true;
 
+	const domainRoutes = (props.domains || []).map((domain) => ({
+		pattern: domain,
+		custom_domain: true,
+	}));
+	const routes =
+		props.routes ?? config.routes ?? (config.route ? [config.route] : []) ?? [];
+	const allDeploymentRoutes = [...routes, ...domainRoutes];
+
 	if (!props.dispatchNamespace && accountId) {
 		try {
 			const serviceMetaData = await fetchResult<{
 				default_environment: {
+					environment: string;
 					script: {
 						tag: string;
 						last_deployed_from: "dash" | "wrangler" | "api";
@@ -372,11 +384,42 @@ export default async function deploy(props: Props): Promise<{
 			workerTag = script.tag;
 
 			if (script.last_deployed_from === "dash") {
-				logger.warn(
-					`You are about to publish a Workers Service that was last published via the Cloudflare Dashboard.\nEdits that have been made via the dashboard will be overridden by your local code and config.`
-				);
-				if (!(await confirm("Would you like to continue?"))) {
-					return { versionId, workerTag };
+				let configDiff: ReturnType<typeof getRemoteConfigDiff> | undefined;
+				if (getFlag("DEPLOY_REMOTE_DIFF_CHECK")) {
+					const remoteWorkerConfig = await downloadWorkerConfig(
+						name,
+						serviceMetaData.default_environment.environment,
+						entry.file,
+						accountId
+					);
+
+					configDiff = getRemoteConfigDiff(remoteWorkerConfig, {
+						...config,
+						// We also want to include all the routes used for deployment
+						routes: allDeploymentRoutes,
+					});
+				}
+
+				if (configDiff) {
+					// If there are only additive changes (or no changes at all) there should be no problem,
+					// just using the local config (and override the remote one) should be totally fine
+					if (!configDiff.nonDestructive) {
+						logger.warn(
+							"The local configuration being used (generated from your local configuration file) differs from the remote configuration of your Worker set via the Cloudflare Dashboard:" +
+								`\n${configDiff.diff}\n\n` +
+								"Deploying the Worker will override the remote configuration with your local one."
+						);
+						if (!(await confirm("Would you like to continue?"))) {
+							return { versionId, workerTag };
+						}
+					}
+				} else {
+					logger.warn(
+						`You are about to publish a Workers Service that was last published via the Cloudflare Dashboard.\nEdits that have been made via the dashboard will be overridden by your local code and config.`
+					);
+					if (!(await confirm("Would you like to continue?"))) {
+						return { versionId, workerTag };
+					}
 				}
 			} else if (script.last_deployed_from === "api") {
 				logger.warn(
@@ -416,9 +459,7 @@ See https://developers.cloudflare.com/workers/platform/compatibility-dates for m
 		);
 	}
 
-	const routes =
-		props.routes ?? config.routes ?? (config.route ? [config.route] : []) ?? [];
-	validateRoutes(routes, props.assetsOptions);
+	validateRoutes(allDeploymentRoutes, props.assetsOptions);
 
 	const jsxFactory = props.jsxFactory || config.jsx_factory;
 	const jsxFragment = props.jsxFragment || config.jsx_fragment;
@@ -521,7 +562,10 @@ See https://developers.cloudflare.com/workers/platform/compatibility-dates for m
 	}
 
 	let sourceMapSize;
-	const normalisedContainerConfig = await getNormalizedContainerOptions(config);
+	const normalisedContainerConfig = await getNormalizedContainerOptions(
+		config,
+		props
+	);
 	try {
 		if (props.noBundle) {
 			// if we're not building, let's just copy the entry to the destination directory
@@ -792,12 +836,14 @@ See https://developers.cloudflare.com/workers/platform/compatibility-dates for m
 		if (props.dryRun) {
 			if (normalisedContainerConfig.length) {
 				for (const container of normalisedContainerConfig) {
-					await maybeBuildContainer(
-						container,
-						workerTag ?? "worker-tag",
-						props.dryRun,
-						dockerPath
-					);
+					if ("dockerfile" in container) {
+						await buildContainer(
+							container,
+							workerTag ?? "worker-tag",
+							props.dryRun,
+							dockerPath
+						);
+					}
 				}
 			}
 
@@ -949,12 +995,15 @@ See https://developers.cloudflare.com/workers/platform/compatibility-dates for m
 						config.tail_consumers
 					);
 				}
-				await helpIfErrorIsSizeOrScriptStartup(
+				const message = await helpIfErrorIsSizeOrScriptStartup(
 					err,
 					dependencies,
 					workerBundle,
 					props.projectRoot
 				);
+				if (message !== null) {
+					logger.error(message);
+				}
 
 				// Apply source mapping to validation startup errors if possible
 				if (
@@ -1047,7 +1096,10 @@ See https://developers.cloudflare.com/workers/platform/compatibility-dates for m
 	}
 
 	// deploy triggers
-	const targets = await triggersDeploy(props);
+	const targets = await triggersDeploy({
+		...props,
+		routes: allDeploymentRoutes,
+	});
 
 	logger.log("Current Version ID:", versionId);
 
@@ -1255,29 +1307,6 @@ async function publishRoutesFallback(
 export function isAuthenticationError(e: unknown): e is ParseError {
 	// TODO: don't want to report these
 	return e instanceof ParseError && (e as { code?: number }).code === 10000;
-}
-
-export async function updateQueueProducers(
-	config: Config
-): Promise<Promise<string[]>[]> {
-	const producers = config.queues.producers || [];
-	const updateProducers: Promise<string[]>[] = [];
-	for (const producer of producers) {
-		const body: PostQueueBody = {
-			queue_name: producer.queue,
-			settings: {
-				delivery_delay: producer.delivery_delay,
-			},
-		};
-
-		updateProducers.push(
-			putQueue(config, producer.queue, body).then(() => [
-				`Producer for ${producer.queue}`,
-			])
-		);
-	}
-
-	return updateProducers;
 }
 
 export async function updateQueueConsumers(

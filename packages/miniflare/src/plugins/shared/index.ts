@@ -2,7 +2,7 @@ import crypto, { createHash } from "crypto";
 import { existsSync } from "fs";
 import fs from "fs/promises";
 import path from "path";
-import { fileURLToPath } from "url";
+import { fileURLToPath, pathToFileURL } from "url";
 import { z } from "zod";
 import {
 	Extension,
@@ -123,6 +123,35 @@ export type Plugin<
 		? { sharedOptions?: undefined }
 		: { sharedOptions: SharedOptions });
 
+/**
+ * loadExternalPlugins will take a packageName, and attempt to load additional
+ * external plugins to add to Miniflare's default ones
+ */
+export async function loadExternalPlugins(
+	packageName: string
+): Promise<Record<string, Plugin<z.AnyZodObject>>> {
+	let pluginModule;
+	try {
+		const pluginPath = require.resolve(packageName);
+		const moduleURL = pathToFileURL(pluginPath).href;
+
+		// eslint-disable-next-line es/no-dynamic-import
+		pluginModule = await import(moduleURL);
+	} catch (error) {
+		throw new MiniflareCoreError(
+			"ERR_PLUGIN_LOADING_FAILED",
+			`Package ${packageName} could not be loaded. ${error}`
+		);
+	}
+	if (!pluginModule.plugins) {
+		throw new MiniflareCoreError(
+			"ERR_PLUGIN_LOADING_FAILED",
+			`Package ${packageName} did not provide any plugins.`
+		);
+	}
+	return pluginModule.plugins;
+}
+
 // When an instance of this class is returned as the binding from `PluginBase#getNodeBindings()`,
 // Miniflare will replace it with a proxy to the binding in `workerd`, alongside applying the
 // specified overrides (if there is any)
@@ -131,7 +160,7 @@ export class ProxyNodeBinding {
 }
 
 export function namespaceKeys(
-	namespaces?: Record<string, string | { id: string }> | string[]
+	namespaces?: Record<string, unknown> | string[]
 ): string[] {
 	if (Array.isArray(namespaces)) {
 		return namespaces;

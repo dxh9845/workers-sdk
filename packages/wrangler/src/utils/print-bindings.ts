@@ -5,7 +5,7 @@ import { UserError } from "../errors";
 import { getFlag } from "../experimental-flags";
 import { logger } from "../logger";
 import type { CfTailConsumer, CfWorkerInit } from "../deployment-bundle/worker";
-import type { WorkerRegistry } from "../dev-registry";
+import type { WorkerRegistry } from "miniflare";
 
 export const friendlyBindingNames: Record<
 	keyof CfWorkerInit["bindings"],
@@ -213,7 +213,11 @@ export function printBindings(
 						destination_address ||
 						allowed_destination_addresses?.join(", ") ||
 						"unrestricted",
-					mode: getMode({ isSimulatedLocally: true }),
+					mode: getMode({
+						isSimulatedLocally: getFlag("REMOTE_BINDINGS")
+							? !emailBinding.experimental_remote
+							: true,
+					}),
 				};
 			})
 		);
@@ -472,11 +476,15 @@ export function printBindings(
 
 	if (pipelines?.length) {
 		output.push(
-			...pipelines.map(({ binding, pipeline }) => ({
+			...pipelines.map(({ binding, pipeline, experimental_remote }) => ({
 				name: binding,
 				type: friendlyBindingNames.pipelines,
 				value: pipeline,
-				mode: getMode(),
+				mode: getMode({
+					isSimulatedLocally: getFlag("REMOTE_BINDINGS")
+						? !experimental_remote
+						: true,
+				}),
 			}))
 		);
 	}
@@ -501,11 +509,16 @@ export function printBindings(
 
 	if (unsafe?.bindings !== undefined && unsafe.bindings.length > 0) {
 		output.push(
-			...unsafe.bindings.map(({ name, type }) => ({
-				name: type,
-				type: friendlyBindingNames.unsafe,
-				value: name,
-				mode: getMode({ isSimulatedLocally: false }),
+			...unsafe.bindings.map((binding) => ({
+				name: binding.name,
+				type:
+					"dev" in binding && binding.dev
+						? binding.dev.plugin.name
+						: friendlyBindingNames.unsafe,
+				value: binding.type,
+				mode: getMode({
+					isSimulatedLocally: !!("dev" in binding && binding.dev),
+				}),
 			}))
 		);
 	}
@@ -720,7 +733,7 @@ export function printBindings(
 	if (hasConnectionStatus) {
 		logger.once.info(
 			dim(
-				`\nService bindings, Durable Object bindings, and Tail consumers connect to other \`wrangler dev\` processes running locally, with their connection status indicated by ${chalk.green("[connected]")} or ${chalk.red("[not connected]")}. For more details, refer to https://developers.cloudflare.com/workers/runtime-apis/bindings/service-bindings/#local-development\n`
+				`\nService bindings, Durable Object bindings, and Tail consumers connect to other wrangler or vite dev processes running locally, with their connection status indicated by ${chalk.green("[connected]")} or ${chalk.red("[not connected]")}. For more details, refer to https://developers.cloudflare.com/workers/runtime-apis/bindings/service-bindings/#local-development\n`
 			)
 		);
 	}
@@ -749,9 +762,6 @@ function createGetMode({
 		connected,
 	}: {
 		// Is this binding running locally?
-		//   local = offline simulator in Miniflare
-		//   remote = some sort of Mixed Mode
-		//   undefined = this binding is not supported in a dev session
 		isSimulatedLocally?: boolean;
 		// If this is an external service/tail/etc... binding, is it connected?
 		//   true = connected via the dev registry

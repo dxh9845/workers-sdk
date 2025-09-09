@@ -40,6 +40,37 @@ export type CloudchamberConfig = {
 	ipv4?: boolean;
 };
 
+type UnsafeBinding = {
+	/**
+	 * The name of the binding provided to the Worker
+	 */
+	name: string;
+	/**
+	 * The 'type' of the unsafe binding.
+	 */
+	type: string;
+	dev?: {
+		plugin: {
+			/**
+			 * Package is the bare specifier of the package that exposes plugins to integrate into Miniflare via a named `plugins` export.
+			 * @example "@cloudflare/my-external-miniflare-plugin"
+			 */
+			package: string;
+			/**
+			 * Plugin is the name of the plugin exposed by the package.
+			 * @example "MY_UNSAFE_PLUGIN"
+			 */
+			name: string;
+		};
+
+		/**
+		 * Optional mapping of unsafe bindings names to options provided for the plugin.
+		 */
+		options?: Record<string, unknown>;
+	};
+	[key: string]: unknown;
+};
+
 /**
  * Configuration for a container application
  */
@@ -150,6 +181,15 @@ export type ContainerApp = {
 		tier?: number;
 	};
 
+	/**
+	 * Scheduling affinities
+	 * @hidden
+	 */
+	affinities?: {
+		colocation?: "datacenter";
+		hardware_generation?: "highest-overall-performance";
+	};
+
 	// not used when deploying container with wrangler deploy
 	/**
 	 * @deprecated use the `class_name` field instead.
@@ -160,11 +200,22 @@ export type ContainerApp = {
 	};
 
 	/**
-	 * How a rollout should be done, defining the size of it
+	 * Configures what percentage of instances should be updated at each step of a rollout.
+	 * You can specify this as a single number, or an array of numbers.
+	 *
+	 * If this is a single number, each step will progress by that percentage.
+	 * The options are 5, 10, 20, 25, 50 or 100.
+	 *
+	 * If this is an array, each step specifies the cumulative rollout progress.
+	 * The final step must be 100.
+	 *
+	 * This can be overridden adhoc by deploying with the `--containers-rollout=immediate` flag,
+	 * which will roll out to 100% of instances in one step.
+	 *
 	 * @optional
-	 * @default 25
+	 * @default [10,100]
 	 * */
-	rollout_step_percentage?: number;
+	rollout_step_percentage?: number | number[];
 
 	/**
 	 * How a rollout should be created. It supports the following modes:
@@ -173,8 +224,16 @@ export type ContainerApp = {
 	 *  - manual: The container application will be rollout fully by manually actioning progress steps.
 	 * @optional
 	 * @default "full_auto"
+	 * @hidden
 	 */
 	rollout_kind?: "full_auto" | "none" | "full_manual";
+
+	/**
+	 * Configures the grace period (in seconds) for active instances before being shutdown during a rollout.
+	 * @optional
+	 * @default 0
+	 */
+	rollout_active_grace_period?: number;
 };
 
 /**
@@ -293,7 +352,7 @@ interface EnvironmentInheritable {
 	 * Whether we use <version>-<name>.<subdomain>.workers.dev to
 	 * serve Preview URLs for your Worker.
 	 *
-	 * @default true
+	 * @default false
 	 * @inheritable
 	 */
 	preview_urls: boolean | undefined;
@@ -664,6 +723,8 @@ export interface EnvironmentNonInheritable {
 		destination_address?: string;
 		/** If this binding should be restricted to a set of verified addresses */
 		allowed_destination_addresses?: string[];
+		/** Whether the binding should be remote or not (only available under `--x-remote-bindings`) */
+		experimental_remote?: boolean;
 	}[];
 
 	/**
@@ -833,9 +894,18 @@ export interface EnvironmentNonInheritable {
 		| {
 				/** The binding name used to refer to the bound service. */
 				binding: string;
-				/** The name of the service. */
+				/**
+				 * The name of the service.
+				 * To bind to a worker in a specific environment,
+				 * you should use the format `<worker_name>-<environment_name>`.
+				 */
 				service: string;
-				/** The environment of the service (e.g. production, staging, etc). */
+				/**
+				 * @hidden
+				 * @deprecated you should use `service: <worker_name>-<environment_name>` instead.
+				 * This refers to the deprecated concept of 'service environments'.
+				 * The environment of the service (e.g. production, staging, etc).
+				 */
 				environment?: string;
 				/** Optionally, the entrypoint (named export) of the service to bind to. */
 				entrypoint?: string;
@@ -946,11 +1016,7 @@ export interface EnvironmentNonInheritable {
 		 * can be used to implement bindings for features that haven't released and aren't supported
 		 * directly by wrangler or miniflare.
 		 */
-		bindings?: {
-			name: string;
-			type: string;
-			[key: string]: unknown;
-		}[];
+		bindings?: UnsafeBinding[];
 
 		/**
 		 * Arbitrary key/value pairs that will be included in the uploaded metadata.  Values specified
@@ -1166,6 +1232,35 @@ export interface Observability {
 		head_sampling_rate?: number;
 		/** Set to false to disable invocation logs */
 		invocation_logs?: boolean;
+		/**
+		 * If logs should be persisted to the Cloudflare observability platform where they can be queried in the dashboard.
+		 *
+		 * @default true
+		 */
+		persist?: boolean;
+		/**
+		 * What destinations logs emitted from the Worker should be sent to.
+		 *
+		 * @default []
+		 */
+		destinations?: string[];
+	};
+	traces?: {
+		enabled?: boolean;
+		/** The sampling rate */
+		head_sampling_rate?: number;
+		/**
+		 * If traces should be persisted to the Cloudflare observability platform where they can be queried in the dashboard.
+		 *
+		 * @default true
+		 */
+		persist?: boolean;
+		/**
+		 * What destinations traces emitted from the Worker should be sent to.
+		 *
+		 * @default []
+		 */
+		destinations?: string[];
 	};
 }
 

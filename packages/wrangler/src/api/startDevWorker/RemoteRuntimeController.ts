@@ -199,6 +199,7 @@ export class RemoteRuntimeController extends RuntimeController {
 			this.#session ??= await this.#previewSession({
 				complianceConfig: { compliance_region: config.complianceRegion },
 				accountId: auth.accountId,
+				apiToken: auth.apiToken,
 				env: config.env, // deprecated service environments -- just pass it through for now
 				legacyEnv: !config.legacy?.enableServiceEnvironments, // wrangler environment -- just pass it through for now
 				host: config.dev.origin?.hostname,
@@ -284,8 +285,6 @@ export class RemoteRuntimeController extends RuntimeController {
 					},
 					liveReload: config.dev.liveReload,
 					proxyLogsToController: true,
-					internalDurableObjects: [],
-					entrypointAddresses: {},
 				},
 			});
 		} catch (error) {

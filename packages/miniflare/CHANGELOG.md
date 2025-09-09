@@ -1,5 +1,180 @@
 # miniflare
 
+## 4.20250906.0
+
+### Patch Changes
+
+- [#10568](https://github.com/cloudflare/workers-sdk/pull/10568) [`dac302c`](https://github.com/cloudflare/workers-sdk/commit/dac302c94b71a9bd84a6d91485f1f914c5e9e866) Thanks [@dependabot](https://github.com/apps/dependabot)! - chore: update dependencies of "miniflare" package
+
+  The following dependency versions have been updated:
+
+  | Dependency | From         | To           |
+  | ---------- | ------------ | ------------ |
+  | workerd    | 1.20250902.0 | 1.20250906.0 |
+
+## 4.20250902.0
+
+### Patch Changes
+
+- [#10535](https://github.com/cloudflare/workers-sdk/pull/10535) [`4cb3370`](https://github.com/cloudflare/workers-sdk/commit/4cb337007b2e9dba085da9b421ed214f532eb81f) Thanks [@dependabot](https://github.com/apps/dependabot)! - chore: update dependencies of "miniflare" package
+
+  The following dependency versions have been updated:
+
+  | Dependency | From         | To           |
+  | ---------- | ------------ | ------------ |
+  | workerd    | 1.20250829.0 | 1.20250902.0 |
+
+## 4.20250829.0
+
+### Patch Changes
+
+- [#10502](https://github.com/cloudflare/workers-sdk/pull/10502) [`22c8ae6`](https://github.com/cloudflare/workers-sdk/commit/22c8ae6364e608b918b19547806229bf7ccbc429) Thanks [@dependabot](https://github.com/apps/dependabot)! - chore: update dependencies of "miniflare" package
+
+  The following dependency versions have been updated:
+
+  | Dependency | From         | To           |
+  | ---------- | ------------ | ------------ |
+  | workerd    | 1.20250823.0 | 1.20250829.0 |
+
+- [#10471](https://github.com/cloudflare/workers-sdk/pull/10471) [`38bdb78`](https://github.com/cloudflare/workers-sdk/commit/38bdb787c607a0411c92a340d75b842f9d67b485) Thanks [@clintonsteiner](https://github.com/clintonsteiner)! - chore: bump `devalue` version to 5.3.2
+
+## 4.20250823.1
+
+### Patch Changes
+
+- [#10437](https://github.com/cloudflare/workers-sdk/pull/10437) [`452ad0b`](https://github.com/cloudflare/workers-sdk/commit/452ad0b1ec58c8078084e0946bf1b3e6ab7f307f) Thanks [@dario-piotrowicz](https://github.com/dario-piotrowicz)! - Loosen validation around different configurations for Durable Object
+
+  Allow durable objects to have `enableSql`, `unsafeUniqueKey` and `unsafePreventEviction` configurations set to `undefined` even if the same durable objects are defined with those configurations set to different values (this allows workers using external durable objects not to have to duplicate such configurations in their options)
+
+## 4.20250823.0
+
+### Patch Changes
+
+- [#10410](https://github.com/cloudflare/workers-sdk/pull/10410) [`f964895`](https://github.com/cloudflare/workers-sdk/commit/f96489502c1282547b6c97af942000867e72b8e7) Thanks [@dependabot](https://github.com/apps/dependabot)! - chore: update dependencies of "miniflare" package
+
+  The following dependency versions have been updated:
+
+  | Dependency                | From          | To            |
+  | ------------------------- | ------------- | ------------- |
+  | workerd                   | 1.20250816.0  | 1.20250823.0  |
+  | @cloudflare/workers-types | ^4.20250813.0 | ^4.20250823.0 |
+
+## 4.20250816.1
+
+### Minor Changes
+
+- [#10012](https://github.com/cloudflare/workers-sdk/pull/10012) [`4728c68`](https://github.com/cloudflare/workers-sdk/commit/4728c684dad6e91748cdd3f40a216664c53ae007) Thanks [@penalosa](https://github.com/penalosa)! - Support unsafe dynamic worker loading bindings
+
+## 4.20250816.0
+
+### Minor Changes
+
+- [#10357](https://github.com/cloudflare/workers-sdk/pull/10357) [`565c3a3`](https://github.com/cloudflare/workers-sdk/commit/565c3a3ddf381945b0bea6c99029d8783e68f6bb) Thanks [@dom96](https://github.com/dom96)! - Use new default entrypoint handlers for Python examples
+
+- [#10255](https://github.com/cloudflare/workers-sdk/pull/10255) [`ddadb93`](https://github.com/cloudflare/workers-sdk/commit/ddadb9320fef96f52fe010f0e98fd75d5a2925ea) Thanks [@ruifigueira](https://github.com/ruifigueira)! - Add `/v1/session` endpoint for Browser Rendering local mode
+
+### Patch Changes
+
+- [#10249](https://github.com/cloudflare/workers-sdk/pull/10249) [`875197a`](https://github.com/cloudflare/workers-sdk/commit/875197a570edacbf1849a2f3d76c011e9b6f9cbf) Thanks [@penalosa](https://github.com/penalosa)! - Support JSRPC for remote bindings. This unlocks:
+  - JSRPC over Service Bindings
+  - JSRPC over Dispatch Namespace Bindings
+  - Email
+  - Pipelines
+
+## 4.20250813.1
+
+### Minor Changes
+
+- [#10349](https://github.com/cloudflare/workers-sdk/pull/10349) [`d54d8b7`](https://github.com/cloudflare/workers-sdk/commit/d54d8b73a2771cde9645937ff241675dddf0e8d2) Thanks [@edmundhung](https://github.com/edmundhung)! - feat: add `unsafeHandleDevRegistryUpdate` callback option to Miniflare
+
+  Adds a new option to Miniflare that allows users to register a callback function that gets invoked whenever the dev registry is updated with changes to external services that the current Worker depends on.
+
+  This callback is useful for scenarios where you need to react to changes in bound services, such as updating bindings tables or reloading configurations when dependent Workers are added, removed, or modified in the dev registry.
+
+  ```typescript
+  const mf = new Miniflare({
+  	// ... other options
+  	unsafeHandleDevRegistryUpdate(registry) {
+  		console.log("Dev registry updated:", registry);
+  		// Handle registry updates (e.g., reprint bindings, reload config)
+  	},
+  });
+  ```
+
+### Patch Changes
+
+- [#10306](https://github.com/cloudflare/workers-sdk/pull/10306) [`ae0c806`](https://github.com/cloudflare/workers-sdk/commit/ae0c806087c203da6a3d7da450e8fabe0d81c987) Thanks [@ruifigueira](https://github.com/ruifigueira)! - Browser Rendering for local development now uses @puppeteer/browsers package instead of puppeteer
+
+## 4.20250813.0
+
+### Patch Changes
+
+- [#10229](https://github.com/cloudflare/workers-sdk/pull/10229) [`5020694`](https://github.com/cloudflare/workers-sdk/commit/5020694dd35578dcf3f1669780889fc0ba632c8e) Thanks [@dependabot](https://github.com/apps/dependabot)! - chore: update dependencies of "miniflare" package
+
+  The following dependency versions have been updated:
+
+  | Dependency                | From          | To            |
+  | ------------------------- | ------------- | ------------- |
+  | workerd                   | 1.20250803.0  | 1.20250813.0  |
+  | @cloudflare/workers-types | ^4.20250803.0 | ^4.20250813.0 |
+
+## 4.20250803.1
+
+### Patch Changes
+
+- [#10273](https://github.com/cloudflare/workers-sdk/pull/10273) [`1479fd0`](https://github.com/cloudflare/workers-sdk/commit/1479fd06b91f9ab529ba4b8824d938e5da3184a0) Thanks [@edmundhung](https://github.com/edmundhung)! - fix: support WebSocket proxying to workerd
+
+  The dev registry proxy server now correctly handles WebSocket upgrade requests and
+  tunnels bidirectional frames between the workerd processes. Previously,
+  handshakes would fail due to missing upgrade logic.
+
+- [#10281](https://github.com/cloudflare/workers-sdk/pull/10281) [`05c5b28`](https://github.com/cloudflare/workers-sdk/commit/05c5b286307bb4b55bd7768bd5873b54f8b06079) Thanks [@edmundhung](https://github.com/edmundhung)! - fix: enable HTTPS support when proxying to workerd
+
+  The Miniflare dev-registry proxy previously assumed workerd would always use HTTP,
+  so enabling `https` on miniflare might caused connection failures in some setups.
+
+  This ensures proxying works whether the option is enabled or not.
+
+- [#10142](https://github.com/cloudflare/workers-sdk/pull/10142) [`e3d9703`](https://github.com/cloudflare/workers-sdk/commit/e3d9703c8733567b9bcad4d6264958f6ba6876f6) Thanks [@edmundhung](https://github.com/edmundhung)! - fix: support `mf.getBindings()` when dev registry is enabled
+
+  Fixes a deadlock when using bindings from `mf.getBindings()` with the dev registry enabled. The deadlock happened because the runtime attempted to resolve a worker address via the loopback server, which was blocked by the Node.js thread waiting on the same runtime.
+
+  Address lookup has been moved to a proxy running in a worker thread to avoid blocking the main thread.
+
+## 4.20250803.0
+
+### Minor Changes
+
+- [#10004](https://github.com/cloudflare/workers-sdk/pull/10004) [`b4d1373`](https://github.com/cloudflare/workers-sdk/commit/b4d13733b5f64f84274a194dd725943658d6184e) Thanks [@dario-piotrowicz](https://github.com/dario-piotrowicz)! - add `structuredWorkerdLogs` option
+
+  add a new top-level option named `structuredWorkerdLogs` that makes workerd print to stdout structured logs (stringified jsons of the following shape: `{ timestamp: number, level: string, message: string }`) instead of printing logs to stdout and stderr
+
+- [#9556](https://github.com/cloudflare/workers-sdk/pull/9556) [`8ba7736`](https://github.com/cloudflare/workers-sdk/commit/8ba7736a8ae5666870d12945a1cb6185b6ac3633) Thanks [@edmundhung](https://github.com/edmundhung)! - Added a `serviceName` option to `unsafeDirectSockets`
+
+  This allows registering the current worker in the dev registry under its own name, but routing to a different service.
+
+### Patch Changes
+
+- [#10148](https://github.com/cloudflare/workers-sdk/pull/10148) [`631f26d`](https://github.com/cloudflare/workers-sdk/commit/631f26df58d8933da81fb312f2ba2e30dc22821a) Thanks [@dependabot](https://github.com/apps/dependabot)! - chore: update dependencies of "miniflare" package
+
+  The following dependency versions have been updated:
+
+  | Dependency                | From          | To            |
+  | ------------------------- | ------------- | ------------- |
+  | workerd                   | 1.20250730.0  | 1.20250801.0  |
+  | @cloudflare/workers-types | ^4.20250730.0 | ^4.20250801.0 |
+
+- [#10203](https://github.com/cloudflare/workers-sdk/pull/10203) [`d6ecd05`](https://github.com/cloudflare/workers-sdk/commit/d6ecd05be5d272857f2b3e243e57ddee4e6a576c) Thanks [@dependabot](https://github.com/apps/dependabot)! - chore: update dependencies of "miniflare" package
+
+  The following dependency versions have been updated:
+
+  | Dependency                | From          | To            |
+  | ------------------------- | ------------- | ------------- |
+  | workerd                   | 1.20250801.0  | 1.20250803.0  |
+  | @cloudflare/workers-types | ^4.20250801.0 | ^4.20250803.0 |
+
+- [#10176](https://github.com/cloudflare/workers-sdk/pull/10176) [`07c8611`](https://github.com/cloudflare/workers-sdk/commit/07c8611b69721e8aa1300ba209dc45a75173e1d7) Thanks [@devin-ai-integration](https://github.com/apps/devin-ai-integration)! - Add macOS version validation to prevent EPIPE errors on unsupported macOS versions (below 13.5). Miniflare and C3 fail hard while Wrangler shows warnings but continues execution.
+
 ## 4.20250730.0
 
 ### Patch Changes

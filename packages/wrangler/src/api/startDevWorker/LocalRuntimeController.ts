@@ -5,6 +5,7 @@ import {
 	cleanupContainers,
 	getDevContainerImageName,
 	prepareContainerImagesForDev,
+	runDockerCmdWithOutput,
 } from "@cloudflare/containers-shared";
 import chalk from "chalk";
 import { Miniflare, Mutex } from "miniflare";
@@ -16,12 +17,13 @@ import { castErrorCause } from "./events";
 import {
 	convertBindingsToCfWorkerInitBindings,
 	convertCfWorkerInitBindingsToBindings,
+	unwrapHook,
 } from "./utils";
-import type { WorkerEntrypointsDefinition } from "../../dev-registry";
 import type { RemoteProxySession } from "../remoteBindings";
 import type {
 	BundleCompleteEvent,
 	BundleStartEvent,
+	DevRegistryUpdateEvent,
 	PreviewTokenExpiredEvent,
 	ReloadCompleteEvent,
 	ReloadStartEvent,
@@ -104,7 +106,7 @@ export async function convertToConfigBundle(
 		complianceRegion: event.config.complianceRegion,
 		bindings,
 		migrations: event.config.migrations,
-		workerDefinitions: event.config.dev?.registry,
+		devRegistry: event.config.dev.registry,
 		legacyAssetPaths: event.config.legacy?.site?.bucket
 			? {
 					baseDirectory: event.config.legacy?.site?.bucket,
@@ -146,6 +148,7 @@ export async function convertToConfigBundle(
 		),
 		containerBuildId: event.config.dev?.containerBuildId,
 		containerEngine: event.config.dev.containerEngine,
+		enableContainers: event.config.dev.enableContainers ?? true,
 	};
 }
 
@@ -204,22 +207,30 @@ export class LocalRuntimeController extends RuntimeController {
 				data.config.dev.experimentalRemoteBindings ?? false;
 
 			if (experimentalRemoteBindings && !data.config.dev?.remote) {
-				// note: mixedMode uses (transitively) LocalRuntimeController, so we need to import
+				// note: remote bindings use (transitively) LocalRuntimeController, so we need to import
 				// from the module lazily in order to avoid circular dependency issues
-				const { maybeStartOrUpdateRemoteProxySession } = await import(
-					"../remoteBindings"
+				const { maybeStartOrUpdateRemoteProxySession, pickRemoteBindings } =
+					await import("../remoteBindings");
+
+				const remoteBindings = pickRemoteBindings(
+					convertCfWorkerInitBindingsToBindings(configBundle.bindings) ?? {}
 				);
+
+				const auth =
+					Object.keys(remoteBindings).length === 0
+						? // If there are no remote bindings (this is a local only session) there's no need to get auth data
+							undefined
+						: await unwrapHook(data.config.dev.auth);
 
 				this.#remoteProxySessionData =
 					await maybeStartOrUpdateRemoteProxySession(
 						{
 							name: configBundle.name,
 							complianceRegion: configBundle.complianceRegion,
-							bindings:
-								convertCfWorkerInitBindingsToBindings(configBundle.bindings) ??
-								{},
+							bindings: remoteBindings,
 						},
-						this.#remoteProxySessionData ?? null
+						this.#remoteProxySessionData ?? null,
+						auth
 					);
 			}
 
@@ -241,6 +252,16 @@ export class LocalRuntimeController extends RuntimeController {
 				);
 
 				for (const container of containerDevOptions) {
+					// if this was triggered by the rebuild hotkey, delete the old image
+					if (this.#currentContainerBuildId !== undefined) {
+						runDockerCmdWithOutput(this.dockerPath, [
+							"rmi",
+							getDevContainerImageName(
+								container.class_name,
+								this.#currentContainerBuildId
+							),
+						]);
+					}
 					this.containerImageTagsSeen.add(container.image_tag);
 				}
 				logger.log(chalk.dim("⎔ Preparing container image(s)..."));
@@ -266,14 +287,20 @@ export class LocalRuntimeController extends RuntimeController {
 				logger.log(chalk.dim("⎔ Container image(s) ready"));
 			}
 
-			const { options, internalObjects, entrypointNames } =
-				await MF.buildMiniflareOptions(
-					this.#log,
-					configBundle,
-					this.#proxyToUserWorkerAuthenticationSecret,
-					this.#remoteProxySessionData?.session?.remoteProxyConnectionString,
-					!!experimentalRemoteBindings
-				);
+			const options = await MF.buildMiniflareOptions(
+				this.#log,
+				configBundle,
+				this.#proxyToUserWorkerAuthenticationSecret,
+				this.#remoteProxySessionData?.session?.remoteProxyConnectionString,
+				!!experimentalRemoteBindings,
+				(registry) => {
+					logger.log(chalk.dim("⎔ Connection status updated"));
+					this.emitDevRegistryUpdateEvent({
+						type: "devRegistryUpdate",
+						registry,
+					});
+				}
+			);
 			options.liveReload = false; // TODO: set in buildMiniflareOptions once old code path is removed
 			if (this.#mf === undefined) {
 				logger.log(chalk.dim("⎔ Starting local server..."));
@@ -301,13 +328,6 @@ export class LocalRuntimeController extends RuntimeController {
 				return;
 			}
 
-			// Get entrypoint addresses
-			const entrypointAddresses: WorkerEntrypointsDefinition = {};
-			for (const name of entrypointNames) {
-				const directUrl = await this.#mf.unsafeGetDirectURL(undefined, name);
-				const port = parseInt(directUrl.port);
-				entrypointAddresses[name] = { host: directUrl.hostname, port };
-			}
 			this.emitReloadCompleteEvent({
 				type: "reloadComplete",
 				config: data.config,
@@ -340,8 +360,6 @@ export class LocalRuntimeController extends RuntimeController {
 					},
 					liveReload: data.config.dev?.liveReload,
 					proxyLogsToController: data.bundle.entry.format === "service-worker",
-					internalDurableObjects: internalObjects,
-					entrypointAddresses,
 				},
 			});
 		} catch (error) {
@@ -427,6 +445,9 @@ export class LocalRuntimeController extends RuntimeController {
 	}
 	emitReloadCompleteEvent(data: ReloadCompleteEvent) {
 		this.emit("reloadComplete", data);
+	}
+	emitDevRegistryUpdateEvent(data: DevRegistryUpdateEvent): void {
+		this.emit("devRegistryUpdate", data);
 	}
 }
 

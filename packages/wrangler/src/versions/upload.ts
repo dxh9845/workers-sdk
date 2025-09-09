@@ -1,5 +1,6 @@
 import assert from "node:assert";
 import { execSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { blue, gray } from "@cloudflare/cli/colors";
@@ -103,6 +104,7 @@ export const versionsUploadCommand = createCommand({
 		owner: "Workers: Authoring and Testing",
 		status: "stable",
 	},
+	positionalArgs: ["script"],
 	args: {
 		script: {
 			describe: "The path to an entry point for your Worker",
@@ -110,17 +112,33 @@ export const versionsUploadCommand = createCommand({
 			requiresArg: true,
 		},
 		name: {
-			describe: "Name of the worker",
+			describe: "Name of the Worker",
+			type: "string",
+			requiresArg: true,
+		},
+		tag: {
+			describe: "A tag for this Worker Gradual Rollouts Version",
+			type: "string",
+			requiresArg: true,
+		},
+		message: {
+			describe:
+				"A descriptive message for this Worker Gradual Rollouts Version",
+			type: "string",
+			requiresArg: true,
+		},
+		"preview-alias": {
+			describe: "Name of an alias for this Worker version",
 			type: "string",
 			requiresArg: true,
 		},
 		bundle: {
-			describe: "Run wrangler's compilation step before publishing",
+			describe: "Run Wrangler's compilation step before publishing",
 			type: "boolean",
 			hidden: true,
 		},
 		"no-bundle": {
-			describe: "Skip internal build steps and directly deploy Worker",
+			describe: "Skip internal build steps and directly upload Worker",
 			type: "boolean",
 			default: false,
 		},
@@ -230,24 +248,8 @@ export const versionsUploadCommand = createCommand({
 			deprecated: true,
 		},
 		"dry-run": {
-			describe: "Don't actually deploy",
+			describe: "Compile a project without actually uploading the version.",
 			type: "boolean",
-		},
-		tag: {
-			describe: "A tag for this Worker Gradual Rollouts Version",
-			type: "string",
-			requiresArg: true,
-		},
-		message: {
-			describe:
-				"A descriptive message for this Worker Gradual Rollouts Version",
-			type: "string",
-			requiresArg: true,
-		},
-		"preview-alias": {
-			describe: "Name of an alias for this Worker version",
-			type: "string",
-			requiresArg: true,
 		},
 		"experimental-auto-create": {
 			describe: "Automatically provision draft bindings with new resources",
@@ -263,6 +265,7 @@ export const versionsUploadCommand = createCommand({
 			MULTIWORKER: false,
 			RESOURCES_PROVISION: args.experimentalProvision ?? false,
 			REMOTE_BINDINGS: args.experimentalRemoteBindings ?? false,
+			DEPLOY_REMOTE_DIFF_CHECK: false,
 		}),
 		warnIfMultipleEnvsConfiguredButNoneSpecified: true,
 	},
@@ -780,12 +783,15 @@ See https://developers.cloudflare.com/workers/platform/compatibility-dates for m
 					);
 				}
 
-				await helpIfErrorIsSizeOrScriptStartup(
+				const message = await helpIfErrorIsSizeOrScriptStartup(
 					err,
 					dependencies,
 					workerBundle,
 					props.projectRoot
 				);
+				if (message) {
+					logger.error(message);
+				}
 
 				// Apply source mapping to validation startup errors if possible
 				if (
@@ -898,9 +904,71 @@ function formatTime(duration: number) {
 	return `(${(duration / 1000).toFixed(2)} sec)`;
 }
 
+// Constants for DNS label constraints and hash configuration
+const MAX_DNS_LABEL_LENGTH = 63;
+const HASH_LENGTH = 4;
+const ALIAS_VALIDATION_REGEX = /^[a-z](?:[a-z0-9-]*[a-z0-9])?$/i;
+
+/**
+ * Sanitizes a branch name to create a valid DNS label alias.
+ * Converts to lowercase, replaces invalid chars with dashes, removes consecutive dashes.
+ */
+function sanitizeBranchName(branchName: string): string {
+	return branchName
+		.replace(/[^a-zA-Z0-9-]/g, "-")
+		.replace(/-+/g, "-")
+		.replace(/^-+|-+$/g, "")
+		.toLowerCase();
+}
+
+/**
+ * Gets the current branch name from CI environment or git.
+ */
+function getBranchName(): string | undefined {
+	// Try CI environment variable first
+	const ciBranchName = getWorkersCIBranchName();
+	if (ciBranchName) {
+		return ciBranchName;
+	}
+
+	// Fall back to git commands
+	try {
+		execSync(`git rev-parse --is-inside-work-tree`, { stdio: "ignore" });
+		return execSync(`git rev-parse --abbrev-ref HEAD`).toString().trim();
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * Creates a truncated alias with hash suffix when the branch name is too long.
+ * Hash from original branch name to preserve uniqueness.
+ */
+function createTruncatedAlias(
+	branchName: string,
+	sanitizedAlias: string,
+	availableSpace: number
+): string | undefined {
+	const spaceForHash = HASH_LENGTH + 1; // +1 for hyphen separator
+	const maxPrefixLength = availableSpace - spaceForHash;
+
+	if (maxPrefixLength < 1) {
+		// Not enough space even with truncation
+		return undefined;
+	}
+
+	const hash = createHash("sha256")
+		.update(branchName)
+		.digest("hex")
+		.slice(0, HASH_LENGTH);
+
+	const truncatedPrefix = sanitizedAlias.slice(0, maxPrefixLength);
+	return `${truncatedPrefix}-${hash}`;
+}
+
 /**
  * Generates a preview alias based on the current git branch.
- * Alias must be <= 63 characters, alphanumeric + dashes only.
+ * Alias must be <= 63 characters, alphanumeric + dashes only, and start with a letter.
  * Returns undefined if not in a git directory or requirements cannot be met.
  */
 export function generatePreviewAlias(scriptName: string): string | undefined {
@@ -911,47 +979,31 @@ export function generatePreviewAlias(scriptName: string): string | undefined {
 		return undefined;
 	};
 
-	let branchName = getWorkersCIBranchName();
-	if (!branchName) {
-		try {
-			execSync(`git rev-parse --is-inside-work-tree`, { stdio: "ignore" });
-			branchName = execSync(`git rev-parse --abbrev-ref HEAD`)
-				.toString()
-				.trim();
-		} catch {
-			return warnAndExit();
-		}
-	}
-
+	const branchName = getBranchName();
 	if (!branchName) {
 		return warnAndExit();
 	}
 
-	const sanitizedAlias = branchName
-		.replace(/[^a-zA-Z0-9-]/g, "-") // Replace all non-alphanumeric characters
-		.replace(/-+/g, "-") // replace multiple dashes
-		.replace(/^-+|-+$/g, "") // trim dashes
-		.toLowerCase(); // lowercase the name
+	const sanitizedAlias = sanitizeBranchName(branchName);
 
-	// Ensure the alias name meets requirements:
-	// - only alphanumeric or hyphen characters
-	// - no trailing slashes
-	// - begins with letter
-	// - no longer than 63 total characters
-	const isValidAlias = /^[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(
-		sanitizedAlias
+	// Validate the sanitized alias meets DNS label requirements
+	if (!ALIAS_VALIDATION_REGEX.test(sanitizedAlias)) {
+		return warnAndExit();
+	}
+
+	const availableSpace = MAX_DNS_LABEL_LENGTH - scriptName.length - 1;
+
+	// If the sanitized alias fits within the remaining space, return it,
+	// otherwise otherwise try truncation with hash suffixed
+	if (sanitizedAlias.length <= availableSpace) {
+		return sanitizedAlias;
+	}
+
+	const truncatedAlias = createTruncatedAlias(
+		branchName,
+		sanitizedAlias,
+		availableSpace
 	);
-	if (!isValidAlias) {
-		return warnAndExit();
-	}
 
-	// Dns labels can only have a max of 63 chars. We use preview urls in the form of <alias>-<workerName>
-	// which means our alias must be shorter than 63-scriptNameLen-1
-	const maxDnsLabelLength = 63;
-	const available = maxDnsLabelLength - scriptName.length - 1;
-	if (sanitizedAlias.length > available) {
-		return warnAndExit();
-	}
-
-	return sanitizedAlias;
+	return truncatedAlias || warnAndExit();
 }

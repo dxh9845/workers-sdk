@@ -1,8 +1,7 @@
 import assert from "node:assert";
 import * as util from "node:util";
 import * as vite from "vite";
-import { isNodeCompat } from "./node-js-compat";
-import { INIT_PATH, UNKNOWN_HOST, VITE_DEV_METADATA_HEADER } from "./shared";
+import { INIT_PATH, UNKNOWN_HOST, WORKER_ENTRY_PATH_HEADER } from "./shared";
 import { getOutputDirectory } from "./utils";
 import type { WorkerConfig, WorkersResolvedConfig } from "./plugin-config";
 import type { Fetcher } from "@cloudflare/workers-types/experimental";
@@ -98,24 +97,18 @@ export class CloudflareDevEnvironment extends vite.DevEnvironment {
 			new URL(INIT_PATH, UNKNOWN_HOST),
 			{
 				headers: {
-					[VITE_DEV_METADATA_HEADER]: JSON.stringify({
-						entryPath: workerConfig.main,
-					}),
+					[WORKER_ENTRY_PATH_HEADER]: workerConfig.main,
 					upgrade: "websocket",
 				},
 			}
 		);
-
 		assert(
 			response.ok,
 			`Failed to initialize module runner, error: ${await response.text()}`
 		);
-
 		const webSocket = response.webSocket;
 		assert(webSocket, "Failed to establish WebSocket");
-
 		webSocket.accept();
-
 		this.#webSocketContainer.webSocket = webSocket;
 	}
 }
@@ -130,11 +123,23 @@ export const cloudflareBuiltInModules = [
 const defaultConditions = ["workerd", "worker", "module", "browser"];
 const target = "es2022";
 
-export function createCloudflareEnvironmentOptions(
-	workerConfig: WorkerConfig,
-	userConfig: vite.UserConfig,
-	environment: { name: string; isEntry: boolean }
-): vite.EnvironmentOptions {
+export function createCloudflareEnvironmentOptions({
+	workerConfig,
+	userConfig,
+	mode,
+	environmentName,
+	isEntryWorker,
+	hasNodeJsCompat,
+}: {
+	workerConfig: WorkerConfig;
+	userConfig: vite.UserConfig;
+	mode: vite.ConfigEnv["mode"];
+	environmentName: string;
+	isEntryWorker: boolean;
+	hasNodeJsCompat: boolean;
+}): vite.EnvironmentOptions {
+	const define = getProcessEnvReplacements(hasNodeJsCompat, mode);
+
 	return {
 		resolve: {
 			// Note: in order for ssr pre-bundling to take effect we need to ask vite to treat all
@@ -145,6 +150,7 @@ export function createCloudflareEnvironmentOptions(
 			// The Cloudflare ones are proper builtins in the environment
 			builtins: [...cloudflareBuiltInModules],
 		},
+		define,
 		dev: {
 			createEnvironment(name, config) {
 				return new CloudflareDevEnvironment(name, config);
@@ -156,12 +162,14 @@ export function createCloudflareEnvironmentOptions(
 			},
 			target,
 			emitAssets: true,
-			manifest: environment.isEntry,
-			outDir: getOutputDirectory(userConfig, environment.name),
+			manifest: isEntryWorker,
+			outDir: getOutputDirectory(userConfig, environmentName),
 			copyPublicDir: false,
 			ssr: true,
 			rollupOptions: {
 				input: workerConfig.main,
+				// workerd checks the types of the exports so we need to ensure that additional exports are not added to the entry module
+				preserveEntrySignatures: "strict",
 				// rolldown-only option
 				...("rolldownVersion" in vite ? ({ platform: "neutral" } as any) : {}),
 			},
@@ -188,11 +196,41 @@ export function createCloudflareEnvironmentOptions(
 					".cts",
 					".ctx",
 				],
+				define,
 			},
 		},
-		// if nodeCompat is enabled then let's keep the real process.env so that workerd can manipulate it
-		keepProcessEnv: isNodeCompat(workerConfig),
+		// We manually set `process.env` replacements using `define`
+		keepProcessEnv: true,
 	};
+}
+
+/**
+ * Gets `process.env` replacement values.
+ * `process.env.NODE_ENV` is always replaced.
+ * `process.env` is replaced with an empty object if `nodejs_compat` is not enabled
+ * @param hasNodeJsCompat - whether `nodejs_compat` is enabled
+ * @param mode - the Vite mode
+ * @returns replacement values
+ */
+function getProcessEnvReplacements(
+	hasNodeJsCompat: boolean,
+	mode: vite.ConfigEnv["mode"]
+): Record<string, string> {
+	const nodeEnv = process.env.NODE_ENV || mode;
+	const nodeEnvReplacements = {
+		"process.env.NODE_ENV": JSON.stringify(nodeEnv),
+		"global.process.env.NODE_ENV": JSON.stringify(nodeEnv),
+		"globalThis.process.env.NODE_ENV": JSON.stringify(nodeEnv),
+	};
+
+	return hasNodeJsCompat
+		? nodeEnvReplacements
+		: {
+				...nodeEnvReplacements,
+				"process.env": "{}",
+				"global.process.env": "{}",
+				"globalThis.process.env": "{}",
+			};
 }
 
 export function initRunners(

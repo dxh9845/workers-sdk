@@ -1,5 +1,5 @@
 import dedent from "ts-dedent";
-import { formatConfigSnippet } from "../config";
+import { updateConfigFile } from "../config";
 import { createCommand, createNamespace } from "../core/create-command";
 import { UserError } from "../errors";
 import { logger } from "../logger";
@@ -94,11 +94,20 @@ export const r2BucketCreateCommand = createCommand({
 		logger.log(dedent`
 			✅ Created bucket '${fullBucketName}' with${
 				location ? ` location hint ${location} and` : ``
-			} default storage class of ${storageClass ? storageClass : `Standard`}.
+			} default storage class of ${storageClass ? storageClass : `Standard`}.`);
 
-			Configure your Worker to write objects to this bucket:
-
-			${formatConfigSnippet({ r2_buckets: [{ bucket_name: args.name, binding: getValidBindingName(args.name, "r2") }] }, config.configPath)}`);
+		await updateConfigFile(
+			(bindingName) => ({
+				r2_buckets: [
+					{
+						bucket_name: args.name,
+						binding: getValidBindingName(bindingName ?? args.name, "r2"),
+					},
+				],
+			}),
+			config.configPath,
+			args.env
+		);
 
 		metrics.sendMetricsEvent("create r2 bucket", {
 			sendMetrics: config.send_metrics,
@@ -198,7 +207,7 @@ export const r2BucketInfoCommand = createCommand({
 	positionalArgs: ["bucket"],
 	args: {
 		bucket: {
-			describe: "The name of the bucket to delete",
+			describe: "The name of the bucket to retrieve info for",
 			type: "string",
 			demandOption: true,
 		},
@@ -208,11 +217,22 @@ export const r2BucketInfoCommand = createCommand({
 			requiresArg: true,
 			type: "string",
 		},
+		json: {
+			describe: "Return the bucket information as JSON",
+			type: "boolean",
+			default: false,
+		},
 	},
+	behaviour: {
+		printBanner: (args) => !args.json,
+	},
+
 	async handler(args, { config }) {
 		const accountId = await requireAuth(config);
 
-		logger.log(`Getting info for '${args.bucket}'...`);
+		if (!args.json) {
+			logger.log(`Getting info for '${args.bucket}'...`);
+		}
 
 		const bucketInfo = await getR2Bucket(
 			config,
@@ -220,6 +240,7 @@ export const r2BucketInfoCommand = createCommand({
 			args.bucket,
 			args.jurisdiction
 		);
+
 		const bucketMetrics = await getR2BucketMetrics(
 			config,
 			accountId,
@@ -236,7 +257,11 @@ export const r2BucketInfoCommand = createCommand({
 			bucket_size: bucketMetrics.totalSize,
 		};
 
-		logger.log(formatLabelledValues(output));
+		if (args.json) {
+			logger.json(output);
+		} else {
+			logger.log(formatLabelledValues(output));
+		}
 	},
 });
 

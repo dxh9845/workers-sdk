@@ -28,6 +28,7 @@ describe("vectorize help", () => {
 			  wrangler vectorize delete <name>                 Delete a Vectorize index
 			  wrangler vectorize get <name>                    Get a Vectorize index by name
 			  wrangler vectorize list                          List your Vectorize indexes
+			  wrangler vectorize list-vectors <name>           List vector identifiers in a Vectorize index
 			  wrangler vectorize query <name>                  Query a Vectorize index
 			  wrangler vectorize insert <name>                 Insert vectors into a Vectorize index
 			  wrangler vectorize upsert <name>                 Upsert vectors into a Vectorize index
@@ -69,6 +70,7 @@ describe("vectorize help", () => {
 			  wrangler vectorize delete <name>                 Delete a Vectorize index
 			  wrangler vectorize get <name>                    Get a Vectorize index by name
 			  wrangler vectorize list                          List your Vectorize indexes
+			  wrangler vectorize list-vectors <name>           List vector identifiers in a Vectorize index
 			  wrangler vectorize query <name>                  Query a Vectorize index
 			  wrangler vectorize insert <name>                 Insert vectors into a Vectorize index
 			  wrangler vectorize upsert <name>                 Upsert vectors into a Vectorize index
@@ -199,8 +201,7 @@ describe("vectorize commands", () => {
 		expect(std.out).toMatchInlineSnapshot(`
 			"🚧 Creating index: 'some-index'
 			✅ Successfully created a new Vectorize index: 'test-index'
-			📋 To start querying from a Worker, add the following binding configuration to your Wrangler configuration file:
-
+			To access your new Vectorize Index in your Worker, add the following snippet to your configuration file:
 			{
 			  \\"vectorize\\": [
 			    {
@@ -220,8 +221,7 @@ describe("vectorize commands", () => {
 		expect(std.out).toMatchInlineSnapshot(`
 			"🚧 Creating index: 'test-index'
 			✅ Successfully created a new Vectorize index: 'test-index'
-			📋 To start querying from a Worker, add the following binding configuration to your Wrangler configuration file:
-
+			To access your new Vectorize Index in your Worker, add the following snippet to your configuration file:
 			{
 			  \\"vectorize\\": [
 			    {
@@ -242,8 +242,7 @@ describe("vectorize commands", () => {
 			"Configuring index based for the embedding model openai/text-embedding-ada-002.
 			🚧 Creating index: 'test-index'
 			✅ Successfully created a new Vectorize index: 'test-index'
-			📋 To start querying from a Worker, add the following binding configuration to your Wrangler configuration file:
-
+			To access your new Vectorize Index in your Worker, add the following snippet to your configuration file:
 			{
 			  \\"vectorize\\": [
 			    {
@@ -675,6 +674,145 @@ describe("vectorize commands", () => {
 		expect(std.out).toMatchInlineSnapshot(`
 			"📋 Deleting metadata index...
 			✅ Successfully enqueued metadata index deletion request. Mutation changeset identifier: xxxxxx-xxxx-xxxx-xxxx-xxxxxx."
+		`);
+	});
+
+	it("should show help when the list-vectors command is passed without an index", async () => {
+		await expect(() => runWrangler("vectorize list-vectors")).rejects.toThrow(
+			"Not enough non-option arguments: got 0, need at least 1"
+		);
+
+		expect(std.err).toMatchInlineSnapshot(`
+			"[31mX [41;31m[[41;97mERROR[41;31m][0m [1mNot enough non-option arguments: got 0, need at least 1[0m
+
+			"
+		`);
+		expect(std.out).toMatchInlineSnapshot(`
+			"
+			wrangler vectorize list-vectors <name>
+
+			List vector identifiers in a Vectorize index
+
+			POSITIONALS
+			  name  The name of the Vectorize index  [string] [required]
+
+			GLOBAL FLAGS
+			  -c, --config    Path to Wrangler configuration file  [string]
+			      --cwd       Run as if Wrangler was started in the specified directory instead of the current working directory  [string]
+			  -e, --env       Environment to use for operations, and for selecting .env and .dev.vars files  [string]
+			      --env-file  Path to an .env file to load - can be specified multiple times - values from earlier files are overridden by values in later files  [array]
+			  -h, --help      Show help  [boolean]
+			  -v, --version   Show version number  [boolean]
+
+			OPTIONS
+			      --count   Maximum number of vectors to return (1-1000)  [number]
+			      --cursor  Cursor for pagination to get the next page of results  [string]
+			      --json    Return output as clean JSON  [boolean] [default: false]
+
+			EXAMPLES
+			  wrangler vectorize list-vectors my-index                  List vector identifiers in the index 'my-index'
+			  wrangler vectorize list-vectors my-index --count 50       List up to 50 vector identifiers
+			  wrangler vectorize list-vectors my-index --cursor abc123  Continue listing from a specific cursor position"
+		`);
+	});
+
+	it("should handle list-vectors on a vectorize index", async () => {
+		mockVectorizeV2Request();
+		await runWrangler("vectorize list-vectors test-index");
+		expect(std.out).toMatchInlineSnapshot(`
+			"📋 Listing vectors in index 'test-index'...
+			┌─┬─┐
+			│ # │ Vector ID │
+			├─┼─┤
+			│ 1 │ vector-1 │
+			├─┼─┤
+			│ 2 │ vector-2 │
+			├─┼─┤
+			│ 3 │ vector-3 │
+			└─┴─┘
+
+			Showing 3 of 5 total vectors
+
+			💡 To get the next page, run:
+			   wrangler vectorize list-vectors test-index --cursor next-page-cursor"
+		`);
+	});
+
+	it("should handle list-vectors with custom count parameter", async () => {
+		mockVectorizeV2Request();
+		await runWrangler("vectorize list-vectors test-index --count 2");
+		expect(std.out).toMatchInlineSnapshot(`
+			"📋 Listing vectors in index 'test-index'...
+			┌─┬─┐
+			│ # │ Vector ID │
+			├─┼─┤
+			│ 1 │ vector-1 │
+			├─┼─┤
+			│ 2 │ vector-2 │
+			└─┴─┘
+
+			Showing 2 of 5 total vectors
+
+			💡 To get the next page, run:
+			   wrangler vectorize list-vectors test-index --cursor next-page-cursor"
+		`);
+	});
+
+	it("should handle list-vectors with cursor pagination", async () => {
+		mockVectorizeV2Request();
+		await runWrangler(
+			"vectorize list-vectors test-index --cursor next-page-cursor"
+		);
+		expect(std.out).toMatchInlineSnapshot(`
+			"📋 Listing vectors in index 'test-index'...
+			┌─┬─┐
+			│ # │ Vector ID │
+			├─┼─┤
+			│ 1 │ vector-4 │
+			├─┼─┤
+			│ 2 │ vector-5 │
+			└─┴─┘
+
+			Showing 2 of 5 total vectors"
+		`);
+	});
+
+	it("should handle list-vectors with JSON output", async () => {
+		mockVectorizeV2Request();
+		await runWrangler("vectorize list-vectors test-index --json");
+		expect(std.out).toMatchInlineSnapshot(`
+			"{
+			  \\"count\\": 3,
+			  \\"totalCount\\": 5,
+			  \\"isTruncated\\": true,
+			  \\"nextCursor\\": \\"next-page-cursor\\",
+			  \\"cursorExpirationTimestamp\\": \\"2025-08-13T20:32:52.469144957+00:00\\",
+			  \\"vectors\\": [
+			    {
+			      \\"id\\": \\"vector-1\\"
+			    },
+			    {
+			      \\"id\\": \\"vector-2\\"
+			    },
+			    {
+			      \\"id\\": \\"vector-3\\"
+			    }
+			  ]
+			}"
+		`);
+	});
+
+	it("should warn when list-vectors returns no vectors", async () => {
+		mockVectorizeV2RequestError();
+		await runWrangler("vectorize list-vectors test-index");
+		expect(std.out).toMatchInlineSnapshot(`
+			"📋 Listing vectors in index 'test-index'..."
+		`);
+
+		expect(std.warn).toMatchInlineSnapshot(`
+			"[33m▲ [43;33m[[43;30mWARNING[43;33m][0m [1mNo vectors found in this index.[0m
+
+"
 		`);
 	});
 });
@@ -1120,6 +1258,58 @@ function mockVectorizeV2Request() {
 				);
 			},
 			{ once: true }
+		),
+		http.get(
+			"*/accounts/:accountId/vectorize/v2/indexes/test-index/list",
+			({ request }) => {
+				const url = new URL(request.url);
+				const count = url.searchParams.get("count");
+				const cursor = url.searchParams.get("cursor");
+
+				// Mock pagination logic
+				if (cursor === "next-page-cursor") {
+					const vectors = [{ id: "vector-4" }, { id: "vector-5" }];
+					return HttpResponse.json(
+						createFetchResult(
+							{
+								count: vectors.length,
+								totalCount: 5,
+								isTruncated: false,
+								nextCursor: null,
+								cursorExpirationTimestamp: null,
+								vectors,
+							},
+							true
+						)
+					);
+				}
+
+				// Default first page response
+				const pageSize = count ? parseInt(count) : 3;
+				const mockVectors = [
+					{ id: "vector-1" },
+					{ id: "vector-2" },
+					{ id: "vector-3" },
+				];
+
+				const returnedVectors = mockVectors.slice(0, pageSize);
+
+				return HttpResponse.json(
+					createFetchResult(
+						{
+							count: returnedVectors.length,
+							totalCount: 5,
+							isTruncated: returnedVectors.length < 5,
+							nextCursor:
+								returnedVectors.length < 5 ? "next-page-cursor" : null,
+							cursorExpirationTimestamp: "2025-08-13T20:32:52.469144957+00:00",
+							vectors: returnedVectors,
+						},
+						true
+					)
+				);
+			},
+			{ once: true }
 		)
 	);
 }
@@ -1162,6 +1352,25 @@ function mockVectorizeV2RequestError() {
 					createFetchResult(
 						{
 							metadataIndexes: [],
+						},
+						true
+					)
+				);
+			},
+			{ once: true }
+		),
+		http.get(
+			"*/accounts/:accountId/vectorize/v2/indexes/test-index/list",
+			() => {
+				return HttpResponse.json(
+					createFetchResult(
+						{
+							count: 0,
+							totalCount: 0,
+							isTruncated: false,
+							nextCursor: null,
+							cursorExpirationTimestamp: null,
+							vectors: [],
 						},
 						true
 					)

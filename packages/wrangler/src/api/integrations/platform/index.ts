@@ -5,7 +5,6 @@ import { readConfig } from "../../../config";
 import { partitionDurableObjectBindings } from "../../../deployment-bundle/entry";
 import { DEFAULT_MODULE_RULES } from "../../../deployment-bundle/rules";
 import { getBindings } from "../../../dev";
-import { getBoundRegisteredWorkers } from "../../../dev-registry";
 import { getClassNamesWhichUseSQLite } from "../../../dev/class-names-sqlite";
 import {
 	buildAssetOptions,
@@ -13,14 +12,16 @@ import {
 	buildSitesOptions,
 	getImageNameFromDOClassName,
 } from "../../../dev/miniflare";
-import { getDockerPath } from "../../../environment-variables/misc-variables";
+import {
+	getDockerPath,
+	getRegistryPath,
+} from "../../../environment-variables/misc-variables";
 import { logger } from "../../../logger";
 import { getSiteAssetPaths } from "../../../sites";
 import { dedent } from "../../../utils/dedent";
 import { maybeStartOrUpdateRemoteProxySession } from "../../remoteBindings";
 import { CacheStorage } from "./caches";
 import { ExecutionContext } from "./executionContext";
-import { getServiceBindings } from "./services";
 import type { AssetsOptions } from "../../../assets";
 import type { Config, RawConfig, RawEnvironment } from "../../../config";
 import type { RemoteProxySession } from "../../remoteBindings";
@@ -144,7 +145,10 @@ export async function getPlatformProxy<
 	let remoteProxySession: RemoteProxySession | undefined = undefined;
 	if (experimentalRemoteBindings && config.configPath) {
 		remoteProxySession = (
-			(await maybeStartOrUpdateRemoteProxySession(config.configPath)) ?? {}
+			(await maybeStartOrUpdateRemoteProxySession({
+				path: config.configPath,
+				environment: env,
+			})) ?? {}
 		).session;
 	}
 
@@ -220,19 +224,12 @@ async function getMiniflareOptionsFromConfig(args: {
 				`);
 		}
 	}
-	const workerDefinitions = await getBoundRegisteredWorkers({
-		name: config.name,
-		services: bindings.services,
-		durableObjects: config["durable_objects"],
-		tailConsumers: [],
-	});
 
 	const { bindingOptions, externalWorkers } = buildMiniflareBindingOptions(
 		{
 			name: config.name,
 			complianceRegion: config.compliance_region,
 			bindings,
-			workerDefinitions,
 			queueConsumers: undefined,
 			services: bindings.services,
 			serviceBindings: {},
@@ -243,6 +240,7 @@ async function getMiniflareOptionsFromConfig(args: {
 				config.containers?.map((c) => c.class_name)
 			),
 			containerBuildId: undefined,
+			enableContainers: config.dev.enable_containers,
 		},
 		remoteProxyConnectionString,
 		remoteBindingsEnabled
@@ -268,8 +266,6 @@ async function getMiniflareOptionsFromConfig(args: {
 
 	const defaultPersistRoot = getMiniflarePersistRoot(options.persist);
 
-	const serviceBindings = await getServiceBindings(bindings.services);
-
 	const miniflareOptions: MiniflareOptions = {
 		workers: [
 			{
@@ -277,10 +273,6 @@ async function getMiniflareOptionsFromConfig(args: {
 				modules: true,
 				name: config.name,
 				...bindingOptions,
-				serviceBindings: {
-					...serviceBindings,
-					...bindingOptions.serviceBindings,
-				},
 				...assetOptions,
 			},
 			...externalWorkers,
@@ -292,6 +284,8 @@ async function getMiniflareOptionsFromConfig(args: {
 		script: "",
 		modules: true,
 		...miniflareOptions,
+		unsafeDevRegistryPath: getRegistryPath(),
+		unsafeDevRegistryDurableObjectProxy: true,
 	};
 }
 
@@ -348,6 +342,7 @@ export function unstable_getMiniflareWorkerOptions(
 		remoteBindingsEnabled?: boolean;
 		overrides?: {
 			assets?: Partial<AssetsOptions>;
+			enableContainers?: boolean;
 		};
 		containerBuildId?: string;
 	}
@@ -361,6 +356,7 @@ export function unstable_getMiniflareWorkerOptions(
 		remoteBindingsEnabled?: boolean;
 		overrides?: {
 			assets?: Partial<AssetsOptions>;
+			enableContainers?: boolean;
 		};
 		containerBuildId?: string;
 	}
@@ -375,6 +371,7 @@ export function unstable_getMiniflareWorkerOptions(
 		remoteBindingsEnabled?: boolean;
 		overrides?: {
 			assets?: Partial<AssetsOptions>;
+			enableContainers?: boolean;
 		};
 		containerBuildId?: string;
 	}
@@ -396,12 +393,17 @@ export function unstable_getMiniflareWorkerOptions(
 		config.containers?.map((c) => c.class_name)
 	);
 	const bindings = getBindings(config, env, options?.envFiles, true, {}, true);
+
+	const enableContainers =
+		options?.overrides?.enableContainers !== undefined
+			? options?.overrides?.enableContainers
+			: config.dev.enable_containers;
+
 	const { bindingOptions, externalWorkers } = buildMiniflareBindingOptions(
 		{
 			name: config.name,
 			complianceRegion: config.compliance_region,
 			bindings,
-			workerDefinitions: null,
 			queueConsumers: config.queues.consumers,
 			services: [],
 			serviceBindings: {},
@@ -410,6 +412,7 @@ export function unstable_getMiniflareWorkerOptions(
 			tails: config.tail_consumers,
 			containerDOClassNames,
 			containerBuildId: options?.containerBuildId,
+			enableContainers,
 		},
 		options?.remoteProxyConnectionString,
 		options?.remoteBindingsEnabled ?? false
@@ -459,11 +462,14 @@ export function unstable_getMiniflareWorkerOptions(
 						className: binding.class_name,
 						scriptName: binding.script_name,
 						useSQLite,
-						container: getImageNameFromDOClassName({
-							doClassName: binding.class_name,
-							containerDOClassNames,
-							containerBuildId: options?.containerBuildId,
-						}),
+						container:
+							enableContainers && config.containers?.length
+								? getImageNameFromDOClassName({
+										doClassName: binding.class_name,
+										containerDOClassNames,
+										containerBuildId: options?.containerBuildId,
+									})
+								: undefined,
 					} satisfies DurableObjectDefinition,
 				];
 			})

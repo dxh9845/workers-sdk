@@ -5,22 +5,20 @@ import {
 	dockerLoginManagedRegistry,
 	getCloudflareContainerRegistry,
 	runDockerCmd,
+	runDockerCmdWithOutput,
 } from "@cloudflare/containers-shared";
-import { ensureDiskLimits } from "../../cloudchamber/build";
 import { UserError } from "../../errors";
 import { mockAccountId, mockApiToken } from "../helpers/mock-account-id";
 import { runInTempDir } from "../helpers/run-in-tmp";
 import { runWrangler } from "../helpers/run-wrangler";
 import { mockAccountV4 as mockAccount } from "./utils";
-import type { CompleteAccountCustomer } from "@cloudflare/containers-shared";
-
-const MiB = 1024 * 1024;
 
 vi.mock("@cloudflare/containers-shared", async (importOriginal) => {
 	const actual = await importOriginal();
 	return Object.assign({}, actual, {
 		dockerLoginManagedRegistry: vi.fn(),
 		runDockerCmd: vi.fn(),
+		runDockerCmdWithOutput: vi.fn(),
 		dockerBuild: vi.fn(() => ({ abort: () => {}, ready: Promise.resolve() })),
 		dockerImageInspect: vi.fn(),
 	});
@@ -36,7 +34,15 @@ describe("buildAndMaybePush", () => {
 
 	beforeEach(() => {
 		vi.clearAllMocks();
-		vi.mocked(dockerImageInspect).mockResolvedValue("53387881 2 []");
+		vi.mocked(dockerImageInspect)
+			// return empty array of repo digests (i.e. image does not exist remotely)
+			.mockResolvedValueOnce("[]")
+			// return image size and number of layers
+			.mockResolvedValueOnce("53387881 2");
+		// we can set this to anything since there is nothing to match from docker image inspect
+		vi.mocked(runDockerCmdWithOutput).mockReturnValueOnce(
+			'{"Descriptor":{"digest":"wont-match-sha"}}'
+		);
 		mkdirSync("./container-context");
 
 		writeFileSync("./container-context/Dockerfile", dockerfile);
@@ -65,11 +71,23 @@ describe("buildAndMaybePush", () => {
 			],
 			dockerfile,
 		});
-		expect(dockerImageInspect).toHaveBeenCalledWith("/custom/docker/path", {
-			imageTag: `${getCloudflareContainerRegistry()}/test-app:tag`,
-			formatString:
-				"{{ .Size }} {{ len .RootFS.Layers }} {{json .RepoDigests}}",
-		});
+		expect(dockerImageInspect).toHaveBeenCalledTimes(2);
+		expect(dockerImageInspect).toHaveBeenNthCalledWith(
+			1,
+			"/custom/docker/path",
+			{
+				imageTag: `${getCloudflareContainerRegistry()}/test-app:tag`,
+				formatString: "{{ json .RepoDigests }} {{ .Id }}",
+			}
+		);
+		expect(dockerImageInspect).toHaveBeenNthCalledWith(
+			2,
+			"/custom/docker/path",
+			{
+				imageTag: `${getCloudflareContainerRegistry()}/test-app:tag`,
+				formatString: "{{ .Size }} {{ len .RootFS.Layers }}",
+			}
+		);
 		expect(runDockerCmd).toHaveBeenCalledWith("/custom/docker/path", [
 			"push",
 			`${getCloudflareContainerRegistry()}/some-account-id/test-app:tag`,
@@ -115,23 +133,34 @@ describe("buildAndMaybePush", () => {
 			"rm",
 			`${getCloudflareContainerRegistry()}/some-account-id/test-app:tag`,
 		]);
-		expect(dockerImageInspect).toHaveBeenCalledOnce();
-		expect(dockerImageInspect).toHaveBeenCalledWith("docker", {
+		expect(dockerImageInspect).toHaveBeenCalledTimes(2);
+		expect(dockerImageInspect).toHaveBeenNthCalledWith(1, "docker", {
 			imageTag: `${getCloudflareContainerRegistry()}/test-app:tag`,
-			formatString:
-				"{{ .Size }} {{ len .RootFS.Layers }} {{json .RepoDigests}}",
+			formatString: "{{ json .RepoDigests }} {{ .Id }}",
+		});
+		expect(dockerImageInspect).toHaveBeenNthCalledWith(2, "docker", {
+			imageTag: `${getCloudflareContainerRegistry()}/test-app:tag`,
+			formatString: "{{ .Size }} {{ len .RootFS.Layers }}",
 		});
 		expect(dockerLoginManagedRegistry).toHaveBeenCalledOnce();
 	});
 
-	it("should be able to build image and not push if it already exists in remote", async () => {
+	it("should be able to build image and not push if it already exists in remote if config sha and digest both match", async () => {
 		vi.mocked(runDockerCmd).mockResolvedValueOnce({
 			abort: () => {},
 			ready: Promise.resolve({ aborted: false }),
 		});
-		vi.mocked(dockerImageInspect).mockResolvedValue(
-			'53387881 2 ["registry.cloudflare.com/test-app@sha256:three"]'
-		);
+		vi.mocked(dockerImageInspect).mockReset();
+		vi.mocked(dockerImageInspect)
+			.mockResolvedValueOnce(
+				'["registry.cloudflare.com/test-app@sha256:three"] matching-config-sha'
+			)
+			.mockResolvedValueOnce("53387881 2");
+		vi.mocked(runDockerCmdWithOutput).mockReset();
+		vi.mocked(runDockerCmdWithOutput).mockImplementationOnce(() => {
+			return '{"Descriptor":{"digest":"matching-config-sha"}}';
+		});
+
 		await runWrangler(
 			"containers build ./container-context -t test-app:tag -p"
 		);
@@ -149,27 +178,27 @@ describe("buildAndMaybePush", () => {
 			],
 			dockerfile,
 		});
-		expect(runDockerCmd).toHaveBeenCalledTimes(2);
-		expect(runDockerCmd).toHaveBeenNthCalledWith(
-			1,
-			"docker",
-			[
-				"manifest",
-				"inspect",
-				`${getCloudflareContainerRegistry()}/some-account-id/test-app@sha256:three`,
-			],
-			"ignore"
-		);
-		expect(runDockerCmd).toHaveBeenNthCalledWith(2, "docker", [
+		expect(runDockerCmdWithOutput).toHaveBeenCalledOnce();
+		expect(runDockerCmdWithOutput).toHaveBeenCalledWith("docker", [
+			"manifest",
+			"inspect",
+			"-v",
+			`${getCloudflareContainerRegistry()}/some-account-id/test-app@sha256:three`,
+		]);
+		expect(runDockerCmd).toHaveBeenCalledOnce();
+		expect(runDockerCmd).toHaveBeenCalledWith("docker", [
 			"image",
 			"rm",
 			`${getCloudflareContainerRegistry()}/test-app:tag`,
 		]);
-		expect(dockerImageInspect).toHaveBeenCalledOnce();
-		expect(dockerImageInspect).toHaveBeenCalledWith("docker", {
+		expect(dockerImageInspect).toHaveBeenCalledTimes(2);
+		expect(dockerImageInspect).toHaveBeenNthCalledWith(1, "docker", {
 			imageTag: `${getCloudflareContainerRegistry()}/test-app:tag`,
-			formatString:
-				"{{ .Size }} {{ len .RootFS.Layers }} {{json .RepoDigests}}",
+			formatString: "{{ json .RepoDigests }} {{ .Id }}",
+		});
+		expect(dockerImageInspect).toHaveBeenNthCalledWith(2, "docker", {
+			imageTag: `${getCloudflareContainerRegistry()}/test-app:tag`,
+			formatString: "{{ .Size }} {{ len .RootFS.Layers }}",
 		});
 		expect(dockerLoginManagedRegistry).toHaveBeenCalledOnce();
 	});
@@ -191,7 +220,7 @@ describe("buildAndMaybePush", () => {
 			],
 			dockerfile,
 		});
-		expect(dockerImageInspect).toHaveBeenCalledOnce();
+		expect(dockerImageInspect).not.toHaveBeenCalledOnce();
 		expect(dockerLoginManagedRegistry).not.toHaveBeenCalled();
 	});
 
@@ -265,45 +294,5 @@ describe("buildAndMaybePush", () => {
 		await expect(
 			runWrangler("containers build ./container-context -t test-app:tag -p")
 		).rejects.toThrow(new UserError(errorMessage));
-	});
-
-	describe("ensureDiskLimits", () => {
-		const accountBase = {
-			limits: { disk_mb_per_deployment: 2000 },
-		} as CompleteAccountCustomer;
-
-		it("should throw error if app configured disk exceeds account limit", async () => {
-			await expect(() =>
-				ensureDiskLimits({
-					requiredSizeInBytes: 333 * MiB, // 333MiB
-					account: accountBase,
-					configDiskInBytes: 3000 * MiB, // ie 3GB - this exceeds the account limit of 2GB
-				})
-			).rejects.toThrowErrorMatchingInlineSnapshot(
-				`[Error: Exceeded account limits: Your container is configured to use a disk size of 3146MB. However, that exceeds the account limit of 2000MB]`
-			);
-		});
-
-		it("should throw error if image size exceeds allowed size", async () => {
-			await expect(() =>
-				ensureDiskLimits({
-					requiredSizeInBytes: 3000 * MiB, // 3GiB
-					account: accountBase,
-					configDiskInBytes: undefined,
-				})
-			).rejects.toThrowErrorMatchingInlineSnapshot(
-				`[Error: Image too large: needs 3146MB, but your app is limited to images with size 2000MB. Your account needs more disk size per instance to run this container. The default disk size is 2GB.]`
-			);
-		});
-
-		it("should not throw when disk size is within limits", async () => {
-			const result = await ensureDiskLimits({
-				requiredSizeInBytes: 256 * MiB, // 256MiB
-				account: accountBase,
-				configDiskInBytes: undefined,
-			});
-
-			expect(result).toEqual(undefined);
-		});
 	});
 });

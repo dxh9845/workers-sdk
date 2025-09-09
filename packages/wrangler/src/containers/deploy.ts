@@ -2,7 +2,6 @@
  * Note! Much of this is copied and modified from cloudchamber/apply.ts
  * However this code is only used for containers interactions, not cloudchamber ones!
  */
-import assert from "node:assert";
 import {
 	endSection,
 	log,
@@ -17,19 +16,20 @@ import {
 	ApiError,
 	ApplicationsService,
 	CreateApplicationRolloutRequest,
-	DeploymentMutationError,
 	resolveImageName,
 	RolloutsService,
 } from "@cloudflare/containers-shared";
-import { inferInstanceType, promiseSpinner } from "../cloudchamber/common";
-import { Diff } from "../cloudchamber/helpers/diff";
+import { promiseSpinner } from "../cloudchamber/common";
+import { inferInstanceType } from "../cloudchamber/instance-type/instance-type";
 import { formatConfigSnippet } from "../config";
 import { FatalError, UserError } from "../errors";
 import { getAccountId } from "../user";
+import { Diff } from "../utils/diff";
 import {
 	sortObjectRecursive,
 	stripUndefined,
 } from "../utils/sortObjectRecursive";
+import type { ImageRef } from "../cloudchamber/build";
 import type { Config } from "../config";
 import type { ContainerApp } from "../config/environment";
 import type {
@@ -40,6 +40,7 @@ import type {
 	CreateApplicationRequest,
 	ModifyApplicationRequestBody,
 	Observability as ObservabilityConfiguration,
+	RolloutStepRequest,
 } from "@cloudflare/containers-shared";
 
 function mergeDeep<T>(target: T, source: Partial<T>): T {
@@ -80,6 +81,7 @@ function createApplicationToModifyApplication(
 		constraints: req.constraints,
 		affinities: req.affinities,
 		scheduling_policy: req.scheduling_policy,
+		rollout_active_grace_period: req.rollout_active_grace_period,
 	};
 }
 
@@ -183,20 +185,17 @@ function containerConfigToCreateRequest(
 		instances: 0,
 		max_instances: containerApp.max_instances,
 		constraints: containerApp.constraints,
+		affinities: containerApp.affinities,
 		durable_objects: {
 			namespace_id: durableObjectNamespaceId,
 		},
+		rollout_active_grace_period: containerApp.rollout_active_grace_period,
 	};
 }
 
 export async function apply(
 	args: {
-		imageUpdateRequired?: boolean;
-		/**
-		 * If the image was built and pushed, or is a registry link, we have to update the image ref and this will be defined
-		 * If it is undefined, the image has not changed, and we do not need to update the image ref
-		 */
-		newImageLink: string | undefined;
+		imageRef: ImageRef;
 		durable_object_namespace_id: string;
 	},
 	containerConfig: ContainerNormalizedConfig,
@@ -224,14 +223,16 @@ export async function apply(
 		(app) => app.name === containerConfig.name
 	);
 
+	// if there is a remote digest, it indicates that the image already exists in the managed registry
+	// so we should try and use the tag from the previous deployment if possible.
+	// however deployments that fail after push may result in no previous app but the image still existing
+	const imageRef =
+		"remoteDigest" in args.imageRef
+			? prevApp?.configuration.image ?? args.imageRef.remoteDigest
+			: args.imageRef.newTag;
 	log(dim("Container application changes\n"));
 
 	const accountId = config.account_id || (await getAccountId(config));
-	const imageRef = args.newImageLink ?? prevApp?.configuration.image;
-
-	// image ref is undefined if the image is a dockerfile and has not changed since the last deploy
-	// if image ref is undefined and there is no previous app, something weird has happened.
-	assert(imageRef, "No changes detected but no previous image found");
 
 	// let's always convert normalised container config -> CreateApplicationRequest
 	// since CreateApplicationRequest is a superset of ModifyApplicationRequestBody
@@ -347,25 +348,22 @@ export async function apply(
 }
 
 function formatError(err: ApiError): string {
-	// TODO: this is bad bad. Please fix like we do in create.ts.
-	// On Cloudchamber API side, we have to improve as well the object validation errors,
-	// so we can detect them here better and pinpoint to the user what's going on.
-	if (
-		err.body.error === DeploymentMutationError.VALIDATE_INPUT &&
-		err.body.details !== undefined
-	) {
-		let message = "";
-		for (const key in err.body.details) {
-			message += `  ${brandColor(key)} ${err.body.details[key]}\n`;
+	try {
+		const maybeError = JSON.parse(err.body.error);
+		if (
+			maybeError.error !== undefined &&
+			maybeError.details !== undefined &&
+			typeof maybeError.details === "object"
+		) {
+			let message = "";
+			message += `${maybeError.error}\n`;
+			for (const key in maybeError.details) {
+				message += `${brandColor(key)} ${maybeError.details[key]}\n`;
+			}
+			return message;
 		}
-
-		return message;
-	}
-
-	if (err.body.error !== undefined) {
-		return `  ${err.body.error}`;
-	}
-
+	} catch {}
+	// if we can't make it pretty, just dump out the error body
 	return JSON.stringify(err.body);
 }
 
@@ -377,7 +375,7 @@ const doAction = async (
 				application: ModifyApplicationRequestBody;
 				id: ApplicationID;
 				name: ApplicationName;
-				rollout_step_percentage?: number;
+				rollout_step_percentage: number | number[];
 				rollout_kind: CreateApplicationRolloutRequest.kind;
 		  }
 ) => {
@@ -386,7 +384,7 @@ const doAction = async (
 		try {
 			application = await promiseSpinner(
 				ApplicationsService.createApplication(action.application),
-				{ message: `Creating ${action.application.name}` }
+				{ message: `Creating "${action.application.name}"` }
 			);
 		} catch (err) {
 			if (!(err instanceof Error)) {
@@ -394,20 +392,18 @@ const doAction = async (
 			}
 
 			if (!(err instanceof ApiError)) {
-				throw new UserError(
+				throw new FatalError(
 					`Unexpected error creating application: ${err.message}`
 				);
 			}
 
 			if (err.status === 400) {
 				throw new UserError(
-					`Error creating application due to a misconfiguration\n${formatError(err)}`
+					`Error creating application due to a misconfiguration:\n${formatError(err)}`
 				);
 			}
 
-			throw new UserError(
-				`Error creating application due to an internal error (request id: ${err.body.request_id}):\n${formatError(err)}`
-			);
+			throw new UserError(`Error creating application:\n${formatError(err)}`);
 		}
 
 		success(
@@ -431,61 +427,62 @@ const doAction = async (
 
 			if (!(err instanceof ApiError)) {
 				throw new UserError(
-					`Unexpected error modifying application ${action.name}: ${err.message}`
+					`Unexpected error modifying application "${action.name}": ${err.message}`
 				);
 			}
 
 			if (err.status === 400) {
 				throw new UserError(
-					`Error modifying application ${action.name} due to a misconfiguration:\n\n\t${formatError(err)}`
+					`Error modifying application "${action.name}" due to a misconfiguration:\n\n\t${formatError(err)}`
 				);
 			}
 
 			throw new UserError(
-				`Error modifying application ${action.name} due to an internal error (request id: ${err.body.request_id}):\n${formatError(err)}`
+				`Error modifying application "${action.name}":\n${formatError(err)}`
 			);
 		}
 
-		if (action.rollout_step_percentage !== undefined) {
-			try {
-				await promiseSpinner(
-					RolloutsService.createApplicationRollout(action.id, {
-						description: "Progressive update",
-						strategy: CreateApplicationRolloutRequest.strategy.ROLLING,
-						target_configuration: action.application.configuration ?? {},
-						step_percentage: action.rollout_step_percentage,
-						kind: action.rollout_kind,
-					}),
-					{
-						message: `rolling out container version ${action.name}`,
-					}
-				);
-			} catch (err) {
-				if (!(err instanceof Error)) {
-					throw err;
+		try {
+			await promiseSpinner(
+				RolloutsService.createApplicationRollout(action.id, {
+					description: "Progressive update",
+					strategy: CreateApplicationRolloutRequest.strategy.ROLLING,
+					target_configuration: action.application.configuration ?? {},
+					...configRolloutStepsToAPI(action.rollout_step_percentage),
+					kind: action.rollout_kind,
+				}),
+				{
+					message: `rolling out container version ${action.name}`,
 				}
+			);
+		} catch (err) {
+			if (!(err instanceof Error)) {
+				throw err;
+			}
 
-				if (!(err instanceof ApiError)) {
-					throw new UserError(
-						`Unexpected error rolling out application ${action.name}:\n${err.message}`
-					);
-				}
-
-				if (err.status === 400) {
-					throw new UserError(
-						`Error rolling out application ${action.name} due to a misconfiguration:\n\n\t${formatError(err)}`
-					);
-				}
-
+			if (!(err instanceof ApiError)) {
 				throw new UserError(
-					`Error rolling out application ${action.name} due to an internal error (request id: ${err.body.request_id}): ${formatError(err)}`
+					`Unexpected error rolling out application "${action.name}":\n${err.message}`
 				);
 			}
+
+			if (err.status === 400) {
+				throw new UserError(
+					`Error rolling out application "${action.name}" due to a misconfiguration:\n\n\t${formatError(err)}`
+				);
+			}
+
+			throw new UserError(
+				`Error rolling out application "${action.name}":\n${formatError(err)}`
+			);
 		}
 
-		success(`Modified application ${brandColor(action.name)}`, {
-			shape: shapes.bar,
-		});
+		success(
+			`Modified application ${brandColor(action.name)} (Application ID: ${action.id})`,
+			{
+				shape: shapes.bar,
+			}
+		);
 	}
 };
 
@@ -508,6 +505,7 @@ export function cleanApplicationFromAPI(
 		name: prev.name,
 		scheduling_policy: prev.scheduling_policy,
 		affinities: prev.affinities,
+		rollout_active_grace_period: prev.rollout_active_grace_period,
 	};
 
 	if ("instance_type" in currentConfig) {
@@ -527,3 +525,20 @@ export function cleanApplicationFromAPI(
 
 	return cleanedPreviousApp;
 }
+
+export const configRolloutStepsToAPI = (rolloutSteps: number | number[]) => {
+	if (typeof rolloutSteps === "number") {
+		return { step_percentage: rolloutSteps };
+	} else {
+		const output: RolloutStepRequest[] = [];
+		let index = 1;
+		for (const step of rolloutSteps) {
+			output.push({
+				step_size: { percentage: step },
+				description: `Step ${index} of ${rolloutSteps.length} - rollout at ${step}% of instances`,
+			});
+			index++;
+		}
+		return { steps: output };
+	}
+};

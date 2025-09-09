@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import { dirname } from "node:path";
-import { formatConfigSnippet } from "../../config";
+import { formatConfigSnippet, parseRawConfigFile } from "../../config";
 import type { RawConfig } from "../../config";
 
 /** Write a mock wrangler config file to disk. */
@@ -8,6 +8,7 @@ export function writeWranglerConfig(
 	config: RawConfig = {},
 	path = "./wrangler.toml"
 ) {
+	const json = /\.json(c)$/.test(path);
 	fs.mkdirSync(dirname(path), { recursive: true });
 	fs.writeFileSync(
 		path,
@@ -17,8 +18,13 @@ export function writeWranglerConfig(
 				name: "test-name",
 				...config,
 			},
-			path
+			path,
+			!!json
 		),
 		"utf-8"
 	);
+}
+
+export function readWranglerConfig(path = "./wrangler.toml"): RawConfig {
+	return parseRawConfigFile(path);
 }

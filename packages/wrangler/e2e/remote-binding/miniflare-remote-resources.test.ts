@@ -85,6 +85,9 @@ const testCases: TestCase<string>[] = [
 						fetch(request) {
 							return new Response("Hello from target worker entrypoint")
 						}
+						add(a, b) {
+							return a + b;
+						}
 					}
 				`,
 			});
@@ -127,6 +130,7 @@ const testCases: TestCase<string>[] = [
 				JSON.stringify({
 					default: "Hello from target worker",
 					entrypoint: "Hello from target worker entrypoint",
+					rpc: 3,
 				})
 			),
 		],
@@ -137,7 +141,7 @@ const testCases: TestCase<string>[] = [
 		setup: async (helper) => {
 			const ns = await helper.kv(false);
 			await helper.run(
-				`wrangler kv key put --remote --namespace-id=${ns} test-mixed-mode-key existing-value`
+				`wrangler kv key put --remote --namespace-id=${ns} test-remote-bindings-key existing-value`
 			);
 			return ns;
 		},
@@ -168,11 +172,11 @@ const testCases: TestCase<string>[] = [
 			await helper.seed({ "test.txt": "existing-value" });
 			const name = await helper.r2(false);
 			await helper.run(
-				`wrangler r2 object put --remote ${name}/test-mixed-mode-key --file test.txt`
+				`wrangler r2 object put --remote ${name}/test-remote-bindings-key --file test.txt`
 			);
 			onTestFinished(async () => {
 				await helper.run(
-					`wrangler r2 object delete --remote ${name}/test-mixed-mode-key`
+					`wrangler r2 object delete --remote ${name}/test-remote-bindings-key`
 				);
 			});
 			return name;
@@ -204,7 +208,7 @@ const testCases: TestCase<string>[] = [
 			await helper.seed({
 				"schema.sql": dedent`
 					CREATE TABLE entries (key TEXT PRIMARY KEY, value TEXT);
-					INSERT INTO entries (key, value) VALUES ('test-mixed-mode-key', 'existing-value');
+					INSERT INTO entries (key, value) VALUES ('test-remote-bindings-key', 'existing-value');
 				`,
 			});
 			const { id, name } = await helper.d1(false);
@@ -288,12 +292,16 @@ const testCases: TestCase<string>[] = [
 		setup: async (helper) => {
 			const namespace = await helper.dispatchNamespace(false);
 
-			const customerWorkerName = "mixed-mode-test-customer-worker";
+			const customerWorkerName = "remote-bindings-test-customer-worker";
 			await helper.seed({
 				"customer-worker.js": dedent/* javascript */ `
-					export default {
+					import {WorkerEntrypoint} from "cloudflare:workers"
+					export default class W extends WorkerEntrypoint {
 						fetch(request) {
 							return new Response("Hello from customer worker")
+						}
+						add(a, b) {
+							return a + b;
 						}
 					}
 				`,
@@ -320,7 +328,61 @@ const testCases: TestCase<string>[] = [
 				},
 			},
 		}),
-		matches: [expect.stringMatching(/Hello from customer worker/)],
+		matches: [
+			expect.stringMatching(
+				JSON.stringify({
+					worker: "Hello from customer worker",
+					rpc: 3,
+				})
+			),
+		],
+	},
+	{
+		name: "Pipelines",
+		scriptPath: "pipelines.js",
+		remoteProxySessionConfig: [
+			{
+				PIPELINE: {
+					type: "pipeline",
+					pipeline: "preserve-e2e-pipelines",
+				},
+			},
+		],
+		miniflareConfig: (connection) => ({
+			pipelines: {
+				PIPELINE: {
+					pipeline: "preserve-e2e-pipelines",
+					remoteProxyConnectionString: connection,
+				},
+			},
+		}),
+		matches: [expect.stringContaining(`Data sent to env.PIPELINE`)],
+		worksWithoutRemoteBindings: true,
+	},
+	{
+		name: "Email",
+		scriptPath: "email.js",
+		remoteProxySessionConfig: [
+			{
+				EMAIL: {
+					type: "send_email",
+				},
+			},
+		],
+		miniflareConfig: (connection) => ({
+			email: {
+				send_email: [
+					{ name: "EMAIL", remoteProxyConnectionString: connection },
+				],
+			},
+		}),
+		matches: [
+			// This error message comes from the production binding, and so indicates that the binding has been called
+			// successfully, which is all we care about. Full E2E testing of email sending would be _incredibly_ flaky
+			expect.stringContaining(
+				`email from example.com not allowed because domain is not owned by the same account`
+			),
+		],
 	},
 ];
 
@@ -408,7 +470,7 @@ const mtlsTest: TestCase<{ certificateId: string; workerName: string }> = {
 };
 
 describe.skipIf(!CLOUDFLARE_ACCOUNT_ID).each([...testCases, mtlsTest])(
-	"Mixed Mode for $name",
+	"Remote bindings test for $name",
 	(testCase) => {
 		let helper: WranglerE2ETestHelper;
 		beforeEach(() => {
@@ -417,7 +479,7 @@ describe.skipIf(!CLOUDFLARE_ACCOUNT_ID).each([...testCases, mtlsTest])(
 		it("enabled", async () => {
 			await runTestCase(testCase as TestCase<unknown>, helper);
 		});
-		// Ensure the test case _relies_ on Mixed Mode, and fails in regular local dev
+		// Ensure the test case _relies_ on remote bindings, and fails in regular local dev
 		it.skipIf(testCase.worksWithoutRemoteBindings)(
 			"fails when disabled",
 			// Turn off retries because this test is expected to fail
@@ -453,7 +515,7 @@ async function runTestCase<T>(
 	);
 
 	const miniflareConfig = disableRemoteBindings
-		? // @ts-expect-error Deliberately passing in undefined here to turn off Mixed Mode
+		? // @ts-expect-error Deliberately passing in undefined here to turn off remote bindings
 			testCase.miniflareConfig(undefined)
 		: testCase.miniflareConfig(
 				remoteProxySession.remoteProxyConnectionString,

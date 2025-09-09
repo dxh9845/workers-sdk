@@ -11,20 +11,21 @@ import { http, HttpResponse } from "msw";
 import dedent from "ts-dedent";
 import { vi } from "vitest";
 import { findWranglerConfig } from "../config/config-helpers";
-import {
-	printBundleSize,
-	printOffendingDependencies,
-} from "../deployment-bundle/bundle-reporter";
+import { printBundleSize } from "../deployment-bundle/bundle-reporter";
 import { clearOutputFilePath } from "../output";
 import { sniffUserAgent } from "../package-manager";
+import { ParseError } from "../parse";
 import { writeAuthConfigFile } from "../user";
+import { diagnoseScriptSizeError } from "../utils/friendly-validator-errors";
 import { mockAccountId, mockApiToken } from "./helpers/mock-account-id";
 import { mockAuthDomain } from "./helpers/mock-auth-domain";
 import { mockConsoleMethods } from "./helpers/mock-console";
 import { clearDialogs, mockConfirm, mockPrompt } from "./helpers/mock-dialogs";
-import { mockGetZoneFromHostRequest } from "./helpers/mock-get-zone-from-host";
+import {
+	mockGetZones,
+	mockGetZonesMulti,
+} from "./helpers/mock-get-zone-from-host";
 import { useMockIsTTY } from "./helpers/mock-istty";
-import { mockCollectKnownRoutesRequest } from "./helpers/mock-known-routes";
 import {
 	mockKeyListRequest,
 	mockListKVNamespacesRequest,
@@ -41,6 +42,10 @@ import {
 	mockSubDomainRequest,
 	mockUpdateWorkerSubdomain,
 } from "./helpers/mock-workers-subdomain";
+import {
+	mockGetZoneWorkerRoutes,
+	mockGetZoneWorkerRoutesMulti,
+} from "./helpers/mock-zone-routes";
 import {
 	createFetchResult,
 	msw,
@@ -59,11 +64,9 @@ import { writeWranglerConfig } from "./helpers/write-wrangler-config";
 import type { AssetManifest } from "../assets";
 import type { Config } from "../config";
 import type { CustomDomain, CustomDomainChangeset } from "../deploy/deploy";
-import type {
-	PostQueueBody,
-	PostTypedConsumerBody,
-	QueueResponse,
-} from "../queues/client";
+import type { WorkerMetadataBinding } from "../deployment-bundle/create-worker-upload-form";
+import type { ServiceMetadataRes } from "../init";
+import type { PostTypedConsumerBody, QueueResponse } from "../queues/client";
 import type { FormData } from "undici";
 import type { Mock } from "vitest";
 
@@ -1101,6 +1104,11 @@ describe("deploy", () => {
 			writeWorkerSource();
 			mockUpdateWorkerSubdomain({ enabled: false });
 			mockUploadWorkerRequest({ expectedType: "esm" });
+			// These run during route conflict resolution.
+			// vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv
+			mockGetZones("example.com", [{ id: "example-com-id" }]);
+			mockGetZoneWorkerRoutes("example-com-id");
+			// ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 			mockPublishRoutesRequest({ routes: ["example.com/some-route/*"] });
 			await runWrangler("deploy ./index");
 		});
@@ -1139,27 +1147,64 @@ describe("deploy", () => {
 			writeWranglerConfig({
 				routes: [
 					"some-example.com/some-route/*",
-					{ pattern: "*a-boring-website.com", zone_id: "54sdf7fsda" },
+					{ pattern: "*a-boring-website.com", zone_id: "a-boring-website-id" },
 					{
 						pattern: "*another-boring-website.com",
 						zone_name: "some-zone.com",
 					},
-					{ pattern: "example.com/some-route/*", zone_id: "JGHFHG654gjcj" },
+					{ pattern: "example.com/some-route/*", zone_id: "example-com-id" },
 					"more-examples.com/*",
 				],
 			});
 			writeWorkerSource();
 			mockUpdateWorkerSubdomain({ enabled: false });
 			mockUploadWorkerRequest({ expectedType: "esm" });
+			// These run during route conflict resolution.
+			// vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv
+			mockGetZonesMulti({
+				"some-example.com": {
+					accountId: "some-account-id",
+					zones: [{ id: "some-example-com-id" }],
+				},
+				"a-boring-website.com": {
+					accountId: "some-account-id",
+					zones: [{ id: "a-boring-website-id" }],
+				},
+				"another-boring-website.com": {
+					accountId: "some-account-id",
+					zones: [{ id: "another-boring-website-id" }],
+				},
+				"some-zone.com": {
+					accountId: "some-account-id",
+					zones: [{ id: "some-zone-id" }],
+				},
+				"example.com": {
+					accountId: "some-account-id",
+					zones: [{ id: "example-com-id" }],
+				},
+				"more-examples.com": {
+					accountId: "some-account-id",
+					zones: [{ id: "more-examples-id" }],
+				},
+			});
+			mockGetZoneWorkerRoutesMulti({
+				"some-example-com-id": [],
+				"a-boring-website-id": [],
+				"another-boring-website-id": [],
+				"some-zone-id": [],
+				"example-com-id": [],
+				"more-examples-id": [],
+			});
+			// ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 			mockPublishRoutesRequest({
 				routes: [
 					"some-example.com/some-route/*",
-					{ pattern: "*a-boring-website.com", zone_id: "54sdf7fsda" },
+					{ pattern: "*a-boring-website.com", zone_id: "a-boring-website-id" },
 					{
 						pattern: "*another-boring-website.com",
 						zone_name: "some-zone.com",
 					},
-					{ pattern: "example.com/some-route/*", zone_id: "JGHFHG654gjcj" },
+					{ pattern: "example.com/some-route/*", zone_id: "example-com-id" },
 					"more-examples.com/*",
 				],
 			});
@@ -1174,9 +1219,9 @@ describe("deploy", () => {
 				Uploaded test-name (TIMINGS)
 				Deployed test-name triggers (TIMINGS)
 				  some-example.com/some-route/*
-				  *a-boring-website.com (zone id: 54sdf7fsda)
+				  *a-boring-website.com (zone id: a-boring-website-id)
 				  *another-boring-website.com (zone name: some-zone.com)
-				  example.com/some-route/* (zone id: JGHFHG654gjcj)
+				  example.com/some-route/* (zone id: example-com-id)
 				  more-examples.com/*
 				Current Version ID: Galaxy-Class",
 				  "warn": "",
@@ -1198,7 +1243,7 @@ describe("deploy", () => {
 			mockUploadWorkerRequest();
 			mockGetWorkerSubdomain({ enabled: false });
 			mockGetZones("owned-zone.com", [{ id: "owned-zone-id-1" }]);
-			mockGetWorkerRoutes("owned-zone-id-1");
+			mockGetZoneWorkerRoutes("owned-zone-id-1");
 			mockPublishRoutesRequest({
 				routes: [
 					{
@@ -1238,7 +1283,7 @@ describe("deploy", () => {
 			mockUploadWorkerRequest();
 			mockGetWorkerSubdomain({ enabled: false });
 			mockGetZones("owned-zone.com", [{ id: "owned-zone-id-1" }]);
-			mockGetWorkerRoutes("owned-zone-id-1");
+			mockGetZoneWorkerRoutes("owned-zone-id-1");
 			mockPublishRoutesRequest({
 				routes: [
 					{
@@ -1270,12 +1315,18 @@ describe("deploy", () => {
 					staging: {
 						routes: [
 							"some-example.com/some-route/*",
-							{ pattern: "*a-boring-website.com", zone_id: "54sdf7fsda" },
+							{
+								pattern: "*a-boring-website.com",
+								zone_id: "a-boring-website-id",
+							},
 							{
 								pattern: "*another-boring-website.com",
 								zone_name: "some-zone.com",
 							},
-							{ pattern: "example.com/some-route/*", zone_id: "JGHFHG654gjcj" },
+							{
+								pattern: "example.com/some-route/*",
+								zone_id: "example-com-id",
+							},
 							"more-examples.com/*",
 						],
 					},
@@ -1294,15 +1345,52 @@ describe("deploy", () => {
 				legacyEnv: false,
 				useOldUploadApi: true,
 			});
+			// These run during route conflict resolution.
+			// vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv
+			mockGetZonesMulti({
+				"some-example.com": {
+					accountId: "some-account-id",
+					zones: [{ id: "some-example-com-id" }],
+				},
+				"a-boring-website.com": {
+					accountId: "some-account-id",
+					zones: [{ id: "a-boring-website-id" }],
+				},
+				"another-boring-website.com": {
+					accountId: "some-account-id",
+					zones: [{ id: "another-boring-website-id" }],
+				},
+				"some-zone.com": {
+					accountId: "some-account-id",
+					zones: [{ id: "some-zone-id" }],
+				},
+				"example.com": {
+					accountId: "some-account-id",
+					zones: [{ id: "example-com-id" }],
+				},
+				"more-examples.com": {
+					accountId: "some-account-id",
+					zones: [{ id: "more-examples-id" }],
+				},
+			});
+			mockGetZoneWorkerRoutesMulti({
+				"some-example-com-id": [],
+				"a-boring-website-id": [],
+				"another-boring-website-id": [],
+				"some-zone-id": [],
+				"example-com-id": [],
+				"more-examples-id": [],
+			});
+			// ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 			mockPublishRoutesRequest({
 				routes: [
 					"some-example.com/some-route/*",
-					{ pattern: "*a-boring-website.com", zone_id: "54sdf7fsda" },
+					{ pattern: "*a-boring-website.com", zone_id: "a-boring-website-id" },
 					{
 						pattern: "*another-boring-website.com",
 						zone_name: "some-zone.com",
 					},
-					{ pattern: "example.com/some-route/*", zone_id: "JGHFHG654gjcj" },
+					{ pattern: "example.com/some-route/*", zone_id: "example-com-id" },
 					"more-examples.com/*",
 				],
 				env: "staging",
@@ -1319,9 +1407,9 @@ describe("deploy", () => {
 				Uploaded test-name (staging) (TIMINGS)
 				Deployed test-name (staging) triggers (TIMINGS)
 				  some-example.com/some-route/*
-				  *a-boring-website.com (zone id: 54sdf7fsda)
+				  *a-boring-website.com (zone id: a-boring-website-id)
 				  *another-boring-website.com (zone name: some-zone.com)
-				  example.com/some-route/* (zone id: JGHFHG654gjcj)
+				  example.com/some-route/* (zone id: example-com-id)
 				  more-examples.com/*
 				Current Version ID: Galaxy-Class",
 				  "warn": "[33m▲ [43;33m[[43;30mWARNING[43;33m][0m [1mProcessing wrangler.toml configuration:[0m
@@ -1354,6 +1442,23 @@ describe("deploy", () => {
 				legacyEnv: true,
 				env: "dev",
 			});
+			// These run during route conflict resolution.
+			// vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv
+			mockGetZonesMulti({
+				"example.com": {
+					accountId: "some-account-id",
+					zones: [{ id: "example-com-id" }],
+				},
+				"dev-example.com": {
+					accountId: "some-account-id",
+					zones: [{ id: "dev-example-com-id" }],
+				},
+			});
+			mockGetZoneWorkerRoutesMulti({
+				"example-com-id": [],
+				"dev-example-com-id": [],
+			});
+			// ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 			mockPublishRoutesRequest({
 				routes: ["dev-example.com/some-route/*"],
 				legacyEnv: true,
@@ -1377,6 +1482,23 @@ describe("deploy", () => {
 				expectedType: "esm",
 				env: "dev",
 			});
+			// These run during route conflict resolution.
+			// vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv
+			mockGetZonesMulti({
+				"example.com": {
+					accountId: "some-account-id",
+					zones: [{ id: "example-com-id" }],
+				},
+				"dev-example.com": {
+					accountId: "some-account-id",
+					zones: [{ id: "dev-example-com-id" }],
+				},
+			});
+			mockGetZoneWorkerRoutesMulti({
+				"example-com-id": [],
+				"dev-example-com-id": [],
+			});
+			// ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 			mockPublishRoutesRequest({
 				routes: ["dev-example.com/some-route/*"],
 				env: "dev",
@@ -1391,16 +1513,19 @@ describe("deploy", () => {
 			writeWorkerSource();
 			mockUpdateWorkerSubdomain({ enabled: false });
 			mockUploadWorkerRequest({ expectedType: "esm" });
-			// Simulate the bulk-routes API failing with a not authorized error.
-			mockUnauthorizedPublishRoutesRequest();
-			// Simulate that the worker has already been deployed to another route in this zone.
-			mockCollectKnownRoutesRequest([
+			// These run during route conflict resolution.
+			// vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv
+			mockGetZones("example.com", [{ id: "example-com-id" }]);
+			mockGetZoneWorkerRoutes("example-com-id", [
+				// Simulate that the worker has already been deployed to another route.
 				{
 					pattern: "foo.example.com/other-route",
 					script: "test-name",
 				},
 			]);
-			mockGetZoneFromHostRequest("example.com", "some-zone-id");
+			// ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+			// Simulate the bulk-routes API failing with a not authorized error.
+			mockUnauthorizedPublishRoutesRequest();
 			mockPublishRoutesFallbackRequest({
 				pattern: "example.com/some-route/*",
 				script: "test-name",
@@ -1409,22 +1534,22 @@ describe("deploy", () => {
 
 			expect(std.err).toMatchInlineSnapshot(`""`);
 			expect(std.warn).toMatchInlineSnapshot(`
-			"[33m▲ [43;33m[[43;30mWARNING[43;33m][0m [1mThe current authentication token does not have 'All Zones' permissions.[0m
+				"[33m▲ [43;33m[[43;30mWARNING[43;33m][0m [1mThe current authentication token does not have 'All Zones' permissions.[0m
 
-			  Falling back to using the zone-based API endpoint to update each route individually.
-			  Note that there is no access to routes associated with zones that the API token does not have
-			  permission for.
-			  Existing routes for this Worker in such zones will not be deleted.
+				  Falling back to using the zone-based API endpoint to update each route individually.
+				  Note that there is no access to routes associated with zones that the API token does not have
+				  permission for.
+				  Existing routes for this Worker in such zones will not be deleted.
 
 
-			[33m▲ [43;33m[[43;30mWARNING[43;33m][0m [1mPreviously deployed routes:[0m
+				[33m▲ [43;33m[[43;30mWARNING[43;33m][0m [1mPreviously deployed routes:[0m
 
-			  The following routes were already associated with this worker, and have not been deleted:
-			   - \\"foo.example.com/other-route\\"
-			  If these routes are not wanted then you can remove them in the dashboard.
+				  The following routes were already associated with this worker, and have not been deleted:
+				   - \\"foo.example.com/other-route\\"
+				  If these routes are not wanted then you can remove them in the dashboard.
 
-			"
-		`);
+				"
+			`);
 			expect(std.out).toMatchInlineSnapshot(`
 				"Total Upload: xx KiB / gzip: xx KiB
 				Worker Startup Time: 100 ms
@@ -1443,16 +1568,19 @@ describe("deploy", () => {
 			writeWorkerSource();
 			mockUpdateWorkerSubdomain({ env: "staging", enabled: false });
 			mockUploadWorkerRequest({ env: "staging", expectedType: "esm" });
-			// Simulate the bulk-routes API failing with a not authorized error.
-			mockUnauthorizedPublishRoutesRequest({ env: "staging" });
-			// Simulate that the worker has already been deployed to another route in this zone.
-			mockCollectKnownRoutesRequest([
+			// These run during route conflict resolution.
+			// vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv
+			mockGetZones("example.com", [{ id: "example-com-id" }]);
+			mockGetZoneWorkerRoutes("example-com-id", [
+				// Simulate that the worker has already been deployed to another route.
 				{
 					pattern: "foo.example.com/other-route",
 					script: "test-name",
 				},
 			]);
-			mockGetZoneFromHostRequest("example.com", "some-zone-id");
+			// ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+			// Simulate the bulk-routes API failing with a not authorized error.
+			mockUnauthorizedPublishRoutesRequest({ env: "staging" });
 			mockPublishRoutesFallbackRequest({
 				pattern: "example.com/some-route/*",
 				script: "test-name",
@@ -1472,6 +1600,11 @@ describe("deploy", () => {
 				writeWorkerSource();
 				mockUpdateWorkerSubdomain({ enabled: false });
 				mockUploadWorkerRequest({ expectedType: "esm" });
+				// These run during route conflict resolution.
+				// vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv
+				mockGetZones("api.example.com", [{ id: "api-example-com-id" }]);
+				mockGetZoneWorkerRoutes("api-example-com-id", []);
+				// ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 				mockCustomDomainsChangesetRequest({});
 				mockPublishCustomDomainsRequest({
 					publishFlags: {
@@ -1492,6 +1625,11 @@ describe("deploy", () => {
 				writeWorkerSource();
 				mockUpdateWorkerSubdomain({ enabled: false });
 				mockUploadWorkerRequest({ expectedType: "esm" });
+				// These run during route conflict resolution.
+				// vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv
+				mockGetZones("api.example.com", [{ id: "api-example-com-id" }]);
+				mockGetZoneWorkerRoutes("api-example-com-id", []);
+				// ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 				mockCustomDomainsChangesetRequest({
 					originConflicts: [
 						{
@@ -1537,6 +1675,11 @@ Update them to point to this script instead?`,
 				writeWorkerSource();
 				mockUpdateWorkerSubdomain({ enabled: false });
 				mockUploadWorkerRequest({ expectedType: "esm" });
+				// These run during route conflict resolution.
+				// vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv
+				mockGetZones("api.example.com", [{ id: "api-example-com-id" }]);
+				mockGetZoneWorkerRoutes("api-example-com-id", []);
+				// ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 				mockCustomDomainsChangesetRequest({
 					dnsRecordConflicts: [
 						{
@@ -1574,6 +1717,11 @@ Update them to point to this script instead?`,
 				writeWorkerSource();
 				mockUpdateWorkerSubdomain({ enabled: false });
 				mockUploadWorkerRequest({ expectedType: "esm" });
+				// These run during route conflict resolution.
+				// vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv
+				mockGetZones("api.example.com", [{ id: "api-example-com-id" }]);
+				mockGetZoneWorkerRoutes("api-example-com-id", []);
+				// ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 				mockCustomDomainsChangesetRequest({
 					originConflicts: [
 						{
@@ -1666,6 +1814,11 @@ Update them to point to this script instead?`,
 				writeWorkerSource();
 				mockUpdateWorkerSubdomain({ enabled: false });
 				mockUploadWorkerRequest({ expectedType: "esm" });
+				// These run during route conflict resolution.
+				// vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv
+				mockGetZones("api.example.com", [{ id: "api-example-com-id" }]);
+				mockGetZoneWorkerRoutes("api-example-com-id", []);
+				// ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 				mockCustomDomainsChangesetRequest({
 					originConflicts: [
 						{
@@ -1696,6 +1849,200 @@ Update them to point to this script instead?`,
 				expect(std.out).toContain(
 					'Publishing to Custom Domain "api.example.com" was skipped, fix conflict and try again'
 				);
+			});
+			it("should deploy domains passed via --domain flag as custom domains", async () => {
+				writeWranglerConfig({});
+				writeWorkerSource();
+				mockSubDomainRequest();
+				mockUpdateWorkerSubdomain({ enabled: false });
+				mockUploadWorkerRequest({ expectedType: "esm" });
+				mockCustomDomainsChangesetRequest({});
+				mockPublishCustomDomainsRequest({
+					publishFlags: {
+						override_scope: true,
+						override_existing_origin: false,
+						override_existing_dns_record: false,
+					},
+					domains: [{ hostname: "api.example.com" }],
+				});
+
+				await runWrangler("deploy ./index --domain api.example.com");
+				expect(std.out).toContain("api.example.com (custom domain)");
+			});
+
+			it("should deploy multiple domains passed via --domain flags", async () => {
+				writeWranglerConfig({});
+				writeWorkerSource();
+				mockSubDomainRequest();
+				mockUpdateWorkerSubdomain({ enabled: false });
+				mockUploadWorkerRequest({ expectedType: "esm" });
+				mockCustomDomainsChangesetRequest({});
+				mockPublishCustomDomainsRequest({
+					publishFlags: {
+						override_scope: true,
+						override_existing_origin: false,
+						override_existing_dns_record: false,
+					},
+					domains: [
+						{ hostname: "api.example.com" },
+						{ hostname: "app.example.com" },
+					],
+				});
+
+				await runWrangler(
+					"deploy ./index --domain api.example.com --domain app.example.com"
+				);
+				expect(std.out).toContain("api.example.com (custom domain)");
+				expect(std.out).toContain("app.example.com (custom domain)");
+			});
+
+			it("should deploy --domain flags alongside routes (from config when no CLI routes)", async () => {
+				writeWranglerConfig({
+					routes: ["example.com/api/*"],
+				});
+				writeWorkerSource();
+				mockSubDomainRequest();
+				mockUpdateWorkerSubdomain({ enabled: false });
+				mockUploadWorkerRequest({ expectedType: "esm" });
+				// These run during route conflict resolution.
+				// vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv
+				mockGetZonesMulti({
+					"example.com": {
+						accountId: "some-account-id",
+						zones: [{ id: "example-com-id" }],
+					},
+					"api.example.com": {
+						accountId: "some-account-id",
+						zones: [{ id: "api-example-com-id" }],
+					},
+				});
+				mockGetZoneWorkerRoutesMulti({
+					"example-com-id": [],
+					"api-example-com-id": [],
+				});
+				// ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+				mockCustomDomainsChangesetRequest({});
+				mockPublishCustomDomainsRequest({
+					publishFlags: {
+						override_scope: true,
+						override_existing_origin: false,
+						override_existing_dns_record: false,
+					},
+					domains: [{ hostname: "api.example.com" }],
+				});
+				// Mock the regular route deployment for the configured route
+				msw.use(
+					http.put(
+						"*/accounts/:accountId/workers/scripts/:scriptName/routes",
+						() => {
+							return HttpResponse.json(
+								{
+									success: true,
+									errors: [],
+									messages: [],
+									result: ["example.com/api/*"],
+								},
+								{ status: 200 }
+							);
+						},
+						{ once: true }
+					)
+				);
+
+				await runWrangler("deploy ./index --domain api.example.com");
+				expect(std.out).toContain("example.com/api/*");
+				expect(std.out).toContain("api.example.com (custom domain)");
+			});
+
+			it("should validate domain flags and reject invalid domains with wildcards", async () => {
+				writeWranglerConfig({});
+				writeWorkerSource();
+
+				await expect(runWrangler("deploy ./index --domain *.example.com"))
+					.rejects.toThrowErrorMatchingInlineSnapshot(`
+					[Error: Invalid Routes:
+					*.example.com:
+					Wildcard operators (*) are not allowed in Custom Domains]
+				`);
+			});
+
+			it("should validate domain flags and reject invalid domains with paths", async () => {
+				writeWranglerConfig({});
+				writeWorkerSource();
+
+				await expect(
+					runWrangler("deploy ./index --domain api.example.com/path")
+				).rejects.toThrowErrorMatchingInlineSnapshot(`
+					[Error: Invalid Routes:
+					api.example.com/path:
+					Paths are not allowed in Custom Domains]
+				`);
+			});
+
+			it("should handle both --route and --domain flags together", async () => {
+				writeWranglerConfig({
+					routes: ["config.com/api/*"],
+				});
+				writeWorkerSource();
+				mockSubDomainRequest();
+				mockUpdateWorkerSubdomain({ enabled: false });
+				mockUploadWorkerRequest({ expectedType: "esm" });
+				// These run during route conflict resolution.
+				// vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv
+				mockGetZonesMulti({
+					"config.com": {
+						accountId: "some-account-id",
+						zones: [{ id: "config-com-id" }],
+					},
+					"api.example.com": {
+						accountId: "some-account-id",
+						zones: [{ id: "api-example-com-id" }],
+					},
+					"cli.com": {
+						accountId: "some-account-id",
+						zones: [{ id: "cli-com-id" }],
+					},
+				});
+				mockGetZoneWorkerRoutesMulti({
+					"config-com-id": [],
+					"api-example-com-id": [],
+					"cli-com-id": [],
+				});
+				// ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+				mockCustomDomainsChangesetRequest({});
+				mockPublishCustomDomainsRequest({
+					publishFlags: {
+						override_scope: true,
+						override_existing_origin: false,
+						override_existing_dns_record: false,
+					},
+					domains: [{ hostname: "api.example.com" }],
+				});
+				// Mock the regular route deployment for the CLI route (should override config)
+				msw.use(
+					http.put(
+						"*/accounts/:accountId/workers/scripts/:scriptName/routes",
+						() => {
+							return HttpResponse.json(
+								{
+									success: true,
+									errors: [],
+									messages: [],
+									result: ["cli.com/override/*"],
+								},
+								{ status: 200 }
+							);
+						},
+						{ once: true }
+					)
+				);
+
+				await runWrangler(
+					"deploy ./index --route cli.com/override/* --domain api.example.com"
+				);
+				expect(std.out).toContain("cli.com/override/*");
+				expect(std.out).toContain("api.example.com (custom domain)");
+				expect(std.out).not.toContain("config.com/api/*");
 			});
 		});
 
@@ -1739,14 +2086,14 @@ Update them to point to this script instead?`,
 						"simple.co.uk/*",
 						"*/*",
 						"*/blog/*",
-						{ pattern: "example.com/blog/*", zone_id: "asdfadsf" },
-						{ pattern: "example.com/*", zone_id: "asdfadsf" },
-						{ pattern: "example.com/abc/def/*", zone_id: "asdfadsf" },
+						{ pattern: "example.com/blog/*", zone_id: "example-com-id" },
+						{ pattern: "example.com/*", zone_id: "example-com-id" },
+						{ pattern: "example.com/abc/def/*", zone_id: "example-com-id" },
 					],
 				});
 				await mockAUSRequest([]);
 				mockSubDomainRequest();
-				mockUpdateWorkerSubdomain({ enabled: false, previews_enabled: true });
+				mockUpdateWorkerSubdomain({ enabled: false, previews_enabled: false });
 				mockUploadWorkerRequest({
 					expectedAssets: {
 						jwt: "<<aus-completion-token>>",
@@ -1754,6 +2101,23 @@ Update them to point to this script instead?`,
 					},
 					expectedType: "none",
 				});
+				// These run during route conflict resolution.
+				// vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv
+				mockGetZonesMulti({
+					"simple.co.uk": {
+						accountId: "some-account-id",
+						zones: [{ id: "simple-co-uk-id" }],
+					},
+					"example.com": {
+						accountId: "some-account-id",
+						zones: [{ id: "example-com-id" }],
+					},
+				});
+				mockGetZoneWorkerRoutesMulti({
+					"simple-co-uk-id": [],
+					"example-com-id": [],
+				});
+				// ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 				mockPublishRoutesRequest({
 					routes: [
 						// @ts-expect-error - this is what is expected
@@ -1774,15 +2138,15 @@ Update them to point to this script instead?`,
 						},
 						{
 							pattern: "example.com/blog/*",
-							zone_id: "asdfadsf",
+							zone_id: "example-com-id",
 						},
 						{
 							pattern: "example.com/*",
-							zone_id: "asdfadsf",
+							zone_id: "example-com-id",
 						},
 						{
 							pattern: "example.com/abc/def/*",
-							zone_id: "asdfadsf",
+							zone_id: "example-com-id",
 						},
 					],
 				});
@@ -1811,9 +2175,9 @@ Update them to point to this script instead?`,
 					  simple.co.uk/*
 					  */*
 					  */blog/*
-					  example.com/blog/* (zone id: asdfadsf)
-					  example.com/* (zone id: asdfadsf)
-					  example.com/abc/def/* (zone id: asdfadsf)
+					  example.com/blog/* (zone id: example-com-id)
+					  example.com/* (zone id: example-com-id)
+					  example.com/abc/def/* (zone id: example-com-id)
 					Current Version ID: Galaxy-Class"
 				`);
 			});
@@ -1821,9 +2185,9 @@ Update them to point to this script instead?`,
 			it("does not mention 404s hit a Worker if it's assets only", async () => {
 				writeWranglerConfig({
 					routes: [
-						{ pattern: "example.com/blog/*", zone_id: "asdfadsf" },
-						{ pattern: "example.com/*", zone_id: "asdfadsf" },
-						{ pattern: "example.com/abc/def/*", zone_id: "asdfadsf" },
+						{ pattern: "example.com/blog/*", zone_id: "example-com-id" },
+						{ pattern: "example.com/*", zone_id: "example-com-id" },
+						{ pattern: "example.com/abc/def/*", zone_id: "example-com-id" },
 					],
 					assets: {
 						directory: "assets",
@@ -1831,7 +2195,7 @@ Update them to point to this script instead?`,
 				});
 				await mockAUSRequest([]);
 				mockSubDomainRequest();
-				mockUpdateWorkerSubdomain({ enabled: false, previews_enabled: true });
+				mockUpdateWorkerSubdomain({ enabled: false, previews_enabled: false });
 				mockUploadWorkerRequest({
 					expectedAssets: {
 						jwt: "<<aus-completion-token>>",
@@ -1839,19 +2203,24 @@ Update them to point to this script instead?`,
 					},
 					expectedType: "none",
 				});
+				// These run during route conflict resolution.
+				// vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv
+				mockGetZones("example.com", [{ id: "example-com-id" }]);
+				mockGetZoneWorkerRoutes("example-com-id", []);
+				// ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 				mockPublishRoutesRequest({
 					routes: [
 						{
 							pattern: "example.com/blog/*",
-							zone_id: "asdfadsf",
+							zone_id: "example-com-id",
 						},
 						{
 							pattern: "example.com/*",
-							zone_id: "asdfadsf",
+							zone_id: "example-com-id",
 						},
 						{
 							pattern: "example.com/abc/def/*",
-							zone_id: "asdfadsf",
+							zone_id: "example-com-id",
 						},
 					],
 				});
@@ -1873,9 +2242,9 @@ Update them to point to this script instead?`,
 					Worker Startup Time: 100 ms
 					Uploaded test-name (TIMINGS)
 					Deployed test-name triggers (TIMINGS)
-					  example.com/blog/* (zone id: asdfadsf)
-					  example.com/* (zone id: asdfadsf)
-					  example.com/abc/def/* (zone id: asdfadsf)
+					  example.com/blog/* (zone id: example-com-id)
+					  example.com/* (zone id: example-com-id)
+					  example.com/abc/def/* (zone id: example-com-id)
 					Current Version ID: Galaxy-Class"
 				`);
 			});
@@ -1883,9 +2252,9 @@ Update them to point to this script instead?`,
 			it("does mention hitting the Worker on 404 if there is one", async () => {
 				writeWranglerConfig({
 					routes: [
-						{ pattern: "example.com/blog/*", zone_id: "asdfadsf" },
-						{ pattern: "example.com/*", zone_id: "asdfadsf" },
-						{ pattern: "example.com/abc/def/*", zone_id: "asdfadsf" },
+						{ pattern: "example.com/blog/*", zone_id: "example-com-id" },
+						{ pattern: "example.com/*", zone_id: "example-com-id" },
+						{ pattern: "example.com/abc/def/*", zone_id: "example-com-id" },
 					],
 					assets: {
 						directory: "assets",
@@ -1894,7 +2263,7 @@ Update them to point to this script instead?`,
 				writeWorkerSource();
 				await mockAUSRequest([]);
 				mockSubDomainRequest();
-				mockUpdateWorkerSubdomain({ enabled: false, previews_enabled: true });
+				mockUpdateWorkerSubdomain({ enabled: false, previews_enabled: false });
 				mockUploadWorkerRequest({
 					expectedAssets: {
 						jwt: "<<aus-completion-token>>",
@@ -1903,19 +2272,24 @@ Update them to point to this script instead?`,
 					expectedType: "esm",
 					expectedMainModule: "index.js",
 				});
+				// These run during route conflict resolution.
+				// vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv
+				mockGetZones("example.com", [{ id: "example-com-id" }]);
+				mockGetZoneWorkerRoutes("example-com-id", []);
+				// ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 				mockPublishRoutesRequest({
 					routes: [
 						{
 							pattern: "example.com/blog/*",
-							zone_id: "asdfadsf",
+							zone_id: "example-com-id",
 						},
 						{
 							pattern: "example.com/*",
-							zone_id: "asdfadsf",
+							zone_id: "example-com-id",
 						},
 						{
 							pattern: "example.com/abc/def/*",
-							zone_id: "asdfadsf",
+							zone_id: "example-com-id",
 						},
 					],
 				});
@@ -1939,9 +2313,9 @@ Update them to point to this script instead?`,
 					Worker Startup Time: 100 ms
 					Uploaded test-name (TIMINGS)
 					Deployed test-name triggers (TIMINGS)
-					  example.com/blog/* (zone id: asdfadsf)
-					  example.com/* (zone id: asdfadsf)
-					  example.com/abc/def/* (zone id: asdfadsf)
+					  example.com/blog/* (zone id: example-com-id)
+					  example.com/* (zone id: example-com-id)
+					  example.com/abc/def/* (zone id: example-com-id)
 					Current Version ID: Galaxy-Class"
 				`);
 			});
@@ -1953,9 +2327,9 @@ Update them to point to this script instead?`,
 						"simple.co.uk/*",
 						"*/*",
 						"*/blog/*",
-						{ pattern: "example.com/blog/*", zone_id: "asdfadsf" },
-						{ pattern: "example.com/*", zone_id: "asdfadsf" },
-						{ pattern: "example.com/abc/def/*", zone_id: "asdfadsf" },
+						{ pattern: "example.com/blog/*", zone_id: "example-com-id" },
+						{ pattern: "example.com/*", zone_id: "example-com-id" },
+						{ pattern: "example.com/abc/def/*", zone_id: "example-com-id" },
 					],
 					assets: {
 						directory: "assets",
@@ -1964,7 +2338,7 @@ Update them to point to this script instead?`,
 				});
 				await mockAUSRequest([]);
 				mockSubDomainRequest();
-				mockUpdateWorkerSubdomain({ enabled: false, previews_enabled: true });
+				mockUpdateWorkerSubdomain({ enabled: false, previews_enabled: false });
 				mockUploadWorkerRequest({
 					expectedAssets: {
 						jwt: "<<aus-completion-token>>",
@@ -1974,6 +2348,23 @@ Update them to point to this script instead?`,
 					},
 					expectedType: "none",
 				});
+				// These run during route conflict resolution.
+				// vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv
+				mockGetZonesMulti({
+					"simple.co.uk": {
+						accountId: "some-account-id",
+						zones: [{ id: "simple-co-uk-id" }],
+					},
+					"example.com": {
+						accountId: "some-account-id",
+						zones: [{ id: "example-com-id" }],
+					},
+				});
+				mockGetZoneWorkerRoutesMulti({
+					"simple-co-uk-id": [],
+					"example-com-id": [],
+				});
+				// ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 				mockPublishRoutesRequest({
 					routes: [
 						// @ts-expect-error - this is what is expected
@@ -1994,15 +2385,15 @@ Update them to point to this script instead?`,
 						},
 						{
 							pattern: "example.com/blog/*",
-							zone_id: "asdfadsf",
+							zone_id: "example-com-id",
 						},
 						{
 							pattern: "example.com/*",
-							zone_id: "asdfadsf",
+							zone_id: "example-com-id",
 						},
 						{
 							pattern: "example.com/abc/def/*",
-							zone_id: "asdfadsf",
+							zone_id: "example-com-id",
 						},
 					],
 				});
@@ -2022,9 +2413,9 @@ Update them to point to this script instead?`,
 					  simple.co.uk/*
 					  */*
 					  */blog/*
-					  example.com/blog/* (zone id: asdfadsf)
-					  example.com/* (zone id: asdfadsf)
-					  example.com/abc/def/* (zone id: asdfadsf)
+					  example.com/blog/* (zone id: example-com-id)
+					  example.com/* (zone id: example-com-id)
+					  example.com/abc/def/* (zone id: example-com-id)
 					Current Version ID: Galaxy-Class"
 				`);
 			});
@@ -5623,6 +6014,42 @@ addEventListener('fetch', event => {});`
 			vi.useRealTimers();
 		});
 
+		it("should include Cloudflare-Workers-Script-Api-Date header", async () => {
+			writeWranglerConfig();
+			writeWorkerSource();
+			mockUploadWorkerRequest();
+			mockGetWorkerSubdomain({ enabled: false });
+			mockSubDomainRequest();
+			msw.use(
+				http.post(
+					`*/accounts/:accountId/workers/scripts/:scriptName/subdomain`,
+					async ({ request, params }) => {
+						expect(params.accountId).toEqual("some-account-id");
+						expect(params.scriptName).toEqual("test-name");
+						expect(
+							request.headers.get("Cloudflare-Workers-Script-Api-Date")
+						).toEqual("2025-08-01");
+						return HttpResponse.json(
+							createFetchResult({ enabled: true, previews_enabled: false })
+						);
+					},
+					{ once: true }
+				)
+			);
+
+			await runWrangler("deploy ./index");
+
+			expect(std.out).toMatchInlineSnapshot(`
+				"Total Upload: xx KiB / gzip: xx KiB
+				Worker Startup Time: 100 ms
+				Uploaded test-name (TIMINGS)
+				Deployed test-name triggers (TIMINGS)
+				  https://test-name.test-sub-domain.workers.dev
+				Current Version ID: Galaxy-Class"
+			`);
+			expect(std.err).toMatchInlineSnapshot(`""`);
+		});
+
 		it("should deploy to a workers.dev domain if workers_dev is undefined", async () => {
 			writeWranglerConfig();
 			writeWorkerSource();
@@ -6181,7 +6608,7 @@ addEventListener('fetch', event => {});`
 			mockGetWorkerSubdomain({ enabled: false });
 			// no set-subdomain call
 			mockGetZones("example.com", [{ id: "example-id" }]);
-			mockGetWorkerRoutes("example-id");
+			mockGetZoneWorkerRoutes("example-id");
 			mockPublishRoutesRequest({ routes: ["http://example.com/*"] });
 			await runWrangler("deploy index.js");
 
@@ -6214,7 +6641,7 @@ addEventListener('fetch', event => {});`
 				legacyEnv: true,
 			});
 			mockGetZones("production.example.com", [{ id: "example-id" }]);
-			mockGetWorkerRoutes("example-id");
+			mockGetZoneWorkerRoutes("example-id");
 			mockPublishRoutesRequest({
 				routes: ["http://production.example.com/*"],
 				env: "production",
@@ -6251,7 +6678,7 @@ addEventListener('fetch', event => {});`
 				legacyEnv: true,
 			});
 			mockGetZones("production.example.com", [{ id: "example-id" }]);
-			mockGetWorkerRoutes("example-id");
+			mockGetZoneWorkerRoutes("example-id");
 			mockPublishRoutesRequest({
 				routes: ["http://production.example.com/*"],
 				env: "production",
@@ -6405,7 +6832,7 @@ addEventListener('fetch', event => {});`
 				legacyEnv: true,
 			});
 			mockGetZones("production.example.com", [{ id: "example-id" }]);
-			mockGetWorkerRoutes("example-id");
+			mockGetZoneWorkerRoutes("example-id");
 			mockPublishRoutesRequest({
 				routes: ["http://production.example.com/*"],
 				env: "production",
@@ -6443,7 +6870,7 @@ addEventListener('fetch', event => {});`
 				legacyEnv: true,
 			});
 			mockGetZones("production.example.com", [{ id: "example-id" }]);
-			mockGetWorkerRoutes("example-id");
+			mockGetZoneWorkerRoutes("example-id");
 			mockPublishRoutesRequest({
 				routes: ["http://production.example.com/*"],
 				env: "production",
@@ -6461,6 +6888,60 @@ addEventListener('fetch', event => {});`
 			`);
 			expect(std.err).toMatchInlineSnapshot(`""`);
 			expect(std.warn).toMatchInlineSnapshot(`""`);
+		});
+
+		it("should warn the user if workers_dev default is different from remote", async () => {
+			writeWranglerConfig({}); // Default workers_dev should be true, since there's no routes.
+			writeWorkerSource();
+			mockSubDomainRequest();
+			mockUploadWorkerRequest();
+			mockGetWorkerSubdomain({ enabled: false });
+			mockUpdateWorkerSubdomain({ enabled: true });
+			await runWrangler("deploy ./index");
+
+			expect(std.out).toMatchInlineSnapshot(`
+				"Total Upload: xx KiB / gzip: xx KiB
+				Worker Startup Time: 100 ms
+				Uploaded test-name (TIMINGS)
+				Deployed test-name triggers (TIMINGS)
+				  https://test-name.test-sub-domain.workers.dev
+				Current Version ID: Galaxy-Class"
+			`);
+			expect(std.err).toMatchInlineSnapshot(`""`);
+			expect(std.warn).toMatchInlineSnapshot(`
+				"[33m▲ [43;33m[[43;30mWARNING[43;33m][0m [1mWorker has workers.dev disabled, but 'workers_dev' is not in the config.[0m
+
+				  Using fallback value 'workers_dev = true'.
+
+				"
+			`);
+		});
+
+		it("should warn the user if preview_urls default is different from remote", async () => {
+			writeWranglerConfig({}); // Default preview_urls should be false.
+			writeWorkerSource();
+			mockSubDomainRequest();
+			mockUploadWorkerRequest();
+			mockGetWorkerSubdomain({ enabled: true, previews_enabled: true });
+			mockUpdateWorkerSubdomain({ enabled: true, previews_enabled: false });
+			await runWrangler("deploy ./index");
+
+			expect(std.out).toMatchInlineSnapshot(`
+				"Total Upload: xx KiB / gzip: xx KiB
+				Worker Startup Time: 100 ms
+				Uploaded test-name (TIMINGS)
+				Deployed test-name triggers (TIMINGS)
+				  https://test-name.test-sub-domain.workers.dev
+				Current Version ID: Galaxy-Class"
+			`);
+			expect(std.err).toMatchInlineSnapshot(`""`);
+			expect(std.warn).toMatchInlineSnapshot(`
+				"[33m▲ [43;33m[[43;30mWARNING[43;33m][0m [1mWorker has preview URLs enabled, but 'preview_urls' is not in the config.[0m
+
+				  Using fallback value 'preview_urls = false'.
+
+				"
+			`);
 		});
 	});
 
@@ -7749,31 +8230,31 @@ addEventListener('fetch', event => {});`
 				"Total Upload: xx KiB / gzip: xx KiB
 				Worker Startup Time: 100 ms
 				Your Worker has access to the following bindings:
-				Binding                                                                                        Resource
-				env.DATA_BLOB_ONE (some-data-blob.bin)                                                         Data Blob
-				env.DATA_BLOB_TWO (more-data-blob.bin)                                                         Data Blob
-				env.DURABLE_OBJECT_ONE (SomeDurableObject, defined in some-durable-object-worker)              Durable Object
-				env.DURABLE_OBJECT_TWO (AnotherDurableObject, defined in another-durable-object-worker)        Durable Object
-				env.KV_NAMESPACE_ONE (kv-ns-one-id)                                                            KV Namespace
-				env.KV_NAMESPACE_TWO (kv-ns-two-id)                                                            KV Namespace
-				env.R2_BUCKET_ONE (r2-bucket-one-name)                                                         R2 Bucket
-				env.R2_BUCKET_TWO (r2-bucket-two-name)                                                         R2 Bucket
-				env.R2_BUCKET_ONE_EU (r2-bucket-one-name (eu))                                                 R2 Bucket
-				env.R2_BUCKET_TWO_EU (r2-bucket-two-name (eu))                                                 R2 Bucket
-				env.httplogs (httplogs)                                                                        logfwdr
-				env.trace (trace)                                                                              logfwdr
-				env.AE_DATASET_ONE (ae-dataset-one-name)                                                       Analytics Engine Dataset
-				env.AE_DATASET_TWO (ae-dataset-two-name)                                                       Analytics Engine Dataset
-				env.TEXT_BLOB_ONE (my-entire-app-depends-on-this.cfg)                                          Text Blob
-				env.TEXT_BLOB_TWO (the-entirety-of-human-knowledge.txt)                                        Text Blob
-				env.some unsafe thing (UNSAFE_BINDING_ONE)                                                     Unsafe Metadata
-				env.another unsafe thing (UNSAFE_BINDING_TWO)                                                  Unsafe Metadata
-				env.ENV_VAR_ONE (123)                                                                          Environment Variable
-				env.ENV_VAR_TWO (\\"Hello, I'm an environment variable\\")                                         Environment Variable
-				env.WASM_MODULE_ONE (some_wasm.wasm)                                                           Wasm Module
-				env.WASM_MODULE_TWO (more_wasm.wasm)                                                           Wasm Module
-				env.extra_data (\\"interesting value\\")                                                           Unsafe Metadata
-				env.more_data (\\"dubious value\\")                                                                Unsafe Metadata
+				Binding                                                                                      Resource
+				env.DATA_BLOB_ONE (some-data-blob.bin)                                                       Data Blob
+				env.DATA_BLOB_TWO (more-data-blob.bin)                                                       Data Blob
+				env.DURABLE_OBJECT_ONE (SomeDurableObject, defined in some-durable-object-worker)            Durable Object
+				env.DURABLE_OBJECT_TWO (AnotherDurableObject, defined in another-durable-object-worker)      Durable Object
+				env.KV_NAMESPACE_ONE (kv-ns-one-id)                                                          KV Namespace
+				env.KV_NAMESPACE_TWO (kv-ns-two-id)                                                          KV Namespace
+				env.R2_BUCKET_ONE (r2-bucket-one-name)                                                       R2 Bucket
+				env.R2_BUCKET_TWO (r2-bucket-two-name)                                                       R2 Bucket
+				env.R2_BUCKET_ONE_EU (r2-bucket-one-name (eu))                                               R2 Bucket
+				env.R2_BUCKET_TWO_EU (r2-bucket-two-name (eu))                                               R2 Bucket
+				env.httplogs (httplogs)                                                                      logfwdr
+				env.trace (trace)                                                                            logfwdr
+				env.AE_DATASET_ONE (ae-dataset-one-name)                                                     Analytics Engine Dataset
+				env.AE_DATASET_TWO (ae-dataset-two-name)                                                     Analytics Engine Dataset
+				env.TEXT_BLOB_ONE (my-entire-app-depends-on-this.cfg)                                        Text Blob
+				env.TEXT_BLOB_TWO (the-entirety-of-human-knowledge.txt)                                      Text Blob
+				env.UNSAFE_BINDING_ONE (some unsafe thing)                                                   Unsafe Metadata
+				env.UNSAFE_BINDING_TWO (another unsafe thing)                                                Unsafe Metadata
+				env.ENV_VAR_ONE (123)                                                                        Environment Variable
+				env.ENV_VAR_TWO (\\"Hello, I'm an environment variable\\")                                       Environment Variable
+				env.WASM_MODULE_ONE (some_wasm.wasm)                                                         Wasm Module
+				env.WASM_MODULE_TWO (more_wasm.wasm)                                                         Wasm Module
+				env.extra_data (\\"interesting value\\")                                                         Unsafe Metadata
+				env.more_data (\\"dubious value\\")                                                              Unsafe Metadata
 
 				Uploaded test-name (TIMINGS)
 				Deployed test-name triggers (TIMINGS)
@@ -9433,7 +9914,7 @@ addEventListener('fetch', event => {});`
 						Worker Startup Time: 100 ms
 						Your Worker has access to the following bindings:
 						Binding                            Resource
-						env.binding-type (my-binding)      Unsafe Metadata
+						env.my-binding (binding-type)      Unsafe Metadata
 
 						Uploaded test-name (TIMINGS)
 						Deployed test-name triggers (TIMINGS)
@@ -9481,7 +9962,7 @@ addEventListener('fetch', event => {});`
 						Worker Startup Time: 100 ms
 						Your Worker has access to the following bindings:
 						Binding                          Resource
-						env.plain_text (my-binding)      Unsafe Metadata
+						env.my-binding (plain_text)      Unsafe Metadata
 
 						Uploaded test-name (TIMINGS)
 						Deployed test-name triggers (TIMINGS)
@@ -10542,217 +11023,6 @@ export default{
 		});
 	});
 
-	describe("--outfile", () => {
-		it("should generate worker bundle at --outfile if specified", async () => {
-			writeWranglerConfig();
-			writeWorkerSource();
-			mockSubDomainRequest();
-			mockUploadWorkerRequest();
-			await runWrangler("deploy index.js --outfile some-dir/worker.bundle");
-			expect(fs.existsSync("some-dir/worker.bundle")).toBe(true);
-			expect(std).toMatchInlineSnapshot(`
-				Object {
-				  "debug": "",
-				  "err": "",
-				  "info": "",
-				  "out": "Total Upload: xx KiB / gzip: xx KiB
-				Worker Startup Time: 100 ms
-				Uploaded test-name (TIMINGS)
-				Deployed test-name triggers (TIMINGS)
-				  https://test-name.test-sub-domain.workers.dev
-				Current Version ID: Galaxy-Class",
-				  "warn": "",
-				}
-			`);
-		});
-
-		it("should include any module imports related assets in the worker bundle", async () => {
-			writeWranglerConfig();
-			fs.writeFileSync(
-				"./index.js",
-				`
-import txt from './textfile.txt';
-import hello from './hello.wasm';
-export default{
-  async fetch(){
-		const module = await WebAssembly.instantiate(hello);
-    return new Response(txt + module.exports.hello);
-  }
-}
-`
-			);
-			fs.writeFileSync("./textfile.txt", "Hello, World!");
-			fs.writeFileSync("./hello.wasm", "Hello wasm World!");
-			mockSubDomainRequest();
-			mockUploadWorkerRequest({
-				expectedModules: {
-					"./0a0a9f2a6772942557ab5355d76af442f8f65e01-textfile.txt":
-						"Hello, World!",
-					"./d025a03cd31e98e96fb5bd5bce87f9bca4e8ce2c-hello.wasm":
-						"Hello wasm World!",
-				},
-			});
-			await runWrangler("deploy index.js --outfile some-dir/worker.bundle");
-
-			expect(fs.existsSync("some-dir/worker.bundle")).toBe(true);
-			expect(
-				fs
-					.readFileSync("some-dir/worker.bundle", "utf8")
-					.replace(
-						/------formdata-undici-0.[0-9]*/g,
-						"------formdata-undici-0.test"
-					)
-					.replace(/wrangler_(.+?)_default/g, "wrangler_default")
-			).toMatchInlineSnapshot(`
-				"------formdata-undici-0.test
-				Content-Disposition: form-data; name=\\"metadata\\"
-
-				{\\"main_module\\":\\"index.js\\",\\"bindings\\":[],\\"compatibility_date\\":\\"2022-01-12\\",\\"compatibility_flags\\":[]}
-				------formdata-undici-0.test
-				Content-Disposition: form-data; name=\\"index.js\\"; filename=\\"index.js\\"
-				Content-Type: application/javascript+module
-
-				// index.js
-				import txt from \\"./0a0a9f2a6772942557ab5355d76af442f8f65e01-textfile.txt\\";
-				import hello from \\"./d025a03cd31e98e96fb5bd5bce87f9bca4e8ce2c-hello.wasm\\";
-				var index_default = {
-				  async fetch() {
-				    const module = await WebAssembly.instantiate(hello);
-				    return new Response(txt + module.exports.hello);
-				  }
-				};
-				export {
-				  index_default as default
-				};
-				//# sourceMappingURL=index.js.map
-
-				------formdata-undici-0.test
-				Content-Disposition: form-data; name=\\"./0a0a9f2a6772942557ab5355d76af442f8f65e01-textfile.txt\\"; filename=\\"./0a0a9f2a6772942557ab5355d76af442f8f65e01-textfile.txt\\"
-				Content-Type: text/plain
-
-				Hello, World!
-				------formdata-undici-0.test
-				Content-Disposition: form-data; name=\\"./d025a03cd31e98e96fb5bd5bce87f9bca4e8ce2c-hello.wasm\\"; filename=\\"./d025a03cd31e98e96fb5bd5bce87f9bca4e8ce2c-hello.wasm\\"
-				Content-Type: application/wasm
-
-				Hello wasm World!
-				------formdata-undici-0.test--
-				"
-			`);
-
-			expect(std).toMatchInlineSnapshot(`
-				Object {
-				  "debug": "",
-				  "err": "",
-				  "info": "",
-				  "out": "Total Upload: xx KiB / gzip: xx KiB
-				Worker Startup Time: 100 ms
-				Uploaded test-name (TIMINGS)
-				Deployed test-name triggers (TIMINGS)
-				  https://test-name.test-sub-domain.workers.dev
-				Current Version ID: Galaxy-Class",
-				  "warn": "",
-				}
-			`);
-		});
-
-		it("should include bindings in the worker bundle", async () => {
-			writeWranglerConfig({
-				kv_namespaces: [{ binding: "KV", id: "kv-namespace-id" }],
-			});
-			fs.writeFileSync(
-				"./index.js",
-				`
-import txt from './textfile.txt';
-import hello from './hello.wasm';
-export default{
-  async fetch(){
-		const module = await WebAssembly.instantiate(hello);
-    return new Response(txt + module.exports.hello);
-  }
-}
-`
-			);
-			fs.writeFileSync("./textfile.txt", "Hello, World!");
-			fs.writeFileSync("./hello.wasm", "Hello wasm World!");
-			mockSubDomainRequest();
-			mockUploadWorkerRequest({
-				expectedModules: {
-					"./0a0a9f2a6772942557ab5355d76af442f8f65e01-textfile.txt":
-						"Hello, World!",
-					"./d025a03cd31e98e96fb5bd5bce87f9bca4e8ce2c-hello.wasm":
-						"Hello wasm World!",
-				},
-			});
-			await runWrangler("deploy index.js --outfile some-dir/worker.bundle");
-
-			expect(fs.existsSync("some-dir/worker.bundle")).toBe(true);
-			expect(
-				fs
-					.readFileSync("some-dir/worker.bundle", "utf8")
-					.replace(
-						/------formdata-undici-0.[0-9]*/g,
-						"------formdata-undici-0.test"
-					)
-					.replace(/wrangler_(.+?)_default/g, "wrangler_default")
-			).toMatchInlineSnapshot(`
-				"------formdata-undici-0.test
-				Content-Disposition: form-data; name=\\"metadata\\"
-
-				{\\"main_module\\":\\"index.js\\",\\"bindings\\":[{\\"name\\":\\"KV\\",\\"type\\":\\"kv_namespace\\",\\"namespace_id\\":\\"kv-namespace-id\\"}],\\"compatibility_date\\":\\"2022-01-12\\",\\"compatibility_flags\\":[]}
-				------formdata-undici-0.test
-				Content-Disposition: form-data; name=\\"index.js\\"; filename=\\"index.js\\"
-				Content-Type: application/javascript+module
-
-				// index.js
-				import txt from \\"./0a0a9f2a6772942557ab5355d76af442f8f65e01-textfile.txt\\";
-				import hello from \\"./d025a03cd31e98e96fb5bd5bce87f9bca4e8ce2c-hello.wasm\\";
-				var index_default = {
-				  async fetch() {
-				    const module = await WebAssembly.instantiate(hello);
-				    return new Response(txt + module.exports.hello);
-				  }
-				};
-				export {
-				  index_default as default
-				};
-				//# sourceMappingURL=index.js.map
-
-				------formdata-undici-0.test
-				Content-Disposition: form-data; name=\\"./0a0a9f2a6772942557ab5355d76af442f8f65e01-textfile.txt\\"; filename=\\"./0a0a9f2a6772942557ab5355d76af442f8f65e01-textfile.txt\\"
-				Content-Type: text/plain
-
-				Hello, World!
-				------formdata-undici-0.test
-				Content-Disposition: form-data; name=\\"./d025a03cd31e98e96fb5bd5bce87f9bca4e8ce2c-hello.wasm\\"; filename=\\"./d025a03cd31e98e96fb5bd5bce87f9bca4e8ce2c-hello.wasm\\"
-				Content-Type: application/wasm
-
-				Hello wasm World!
-				------formdata-undici-0.test--
-				"
-			`);
-
-			expect(std).toMatchInlineSnapshot(`
-				Object {
-				  "debug": "",
-				  "err": "",
-				  "info": "",
-				  "out": "Total Upload: xx KiB / gzip: xx KiB
-				Worker Startup Time: 100 ms
-				Your Worker has access to the following bindings:
-				Binding                       Resource
-				env.KV (kv-namespace-id)      KV Namespace
-
-				Uploaded test-name (TIMINGS)
-				Deployed test-name triggers (TIMINGS)
-				  https://test-name.test-sub-domain.workers.dev
-				Current Version ID: Galaxy-Class",
-				  "warn": "",
-				}
-			`);
-		});
-	});
-
 	describe("--dry-run", () => {
 		it("should not deploy the worker if --dry-run is specified", async () => {
 			writeWranglerConfig({
@@ -11178,7 +11448,23 @@ export default{
 			expect(std).toMatchInlineSnapshot(`
 				Object {
 				  "debug": "",
-				  "err": "",
+				  "err": "[31mX [41;31m[[41;97mERROR[41;31m][0m [1mYour Worker failed validation because it exceeded size limits.[0m
+
+
+				  A request to the Cloudflare API (/accounts/some-account-id/workers/scripts/test-name/versions)
+				  failed.
+				   - workers.api.error.script_too_large [code: 10027]
+				  Here are the 4 largest dependencies included in your script:
+
+				  - index.js - xx KiB
+				  - add.wasm - xx KiB
+				  - dependency.js - xx KiB
+				  - message.txt - xx KiB
+
+				  If these are unnecessary, consider removing them
+
+
+				",
 				  "info": "",
 				  "out": "Total Upload: xx KiB / gzip: xx KiB
 
@@ -11190,15 +11476,7 @@ export default{
 				  [4mhttps://github.com/cloudflare/workers-sdk/issues/new/choose[0m
 
 				",
-				  "warn": "[33m▲ [43;33m[[43;30mWARNING[43;33m][0m [1mHere are the 4 largest dependencies included in your script:[0m
-
-				  - index.js - xx KiB
-				  - add.wasm - xx KiB
-				  - dependency.js - xx KiB
-				  - message.txt - xx KiB
-				  If these are unnecessary, consider removing them
-
-				",
+				  "warn": "",
 				}
 			`);
 		});
@@ -11239,9 +11517,43 @@ export default{
 				main: "index.js",
 			});
 
-			await expect(runWrangler("deploy")).rejects.toThrowError(
-				`Your Worker failed validation because it exceeded startup limits.`
-			);
+			await expect(runWrangler("deploy")).rejects.toThrowError();
+			expect(std).toMatchInlineSnapshot(`
+				Object {
+				  "debug": "",
+				  "err": "[31mX [41;31m[[41;97mERROR[41;31m][0m [1mYour Worker failed validation because it exceeded startup limits.[0m
+
+
+				  A request to the Cloudflare API (/accounts/some-account-id/workers/scripts/test-name/versions)
+				  failed.
+				   - Error: Script startup exceeded CPU time limit. [code: 10021]
+
+				  To ensure fast responses, there are constraints on Worker startup, such as how much CPU it can
+				  use, or how long it can take. Your Worker has hit one of these startup limits. Try reducing the
+				  amount of work done during startup (outside the event handler), either by removing code or
+				  relocating it inside the event handler.
+
+				  Refer to [4mhttps://developers.cloudflare.com/workers/platform/limits/#worker-startup-time[0m for more
+				  details
+				  A CPU Profile of your Worker's startup phase has been written to
+				  .wrangler/tmp/startup-profile-<HASH>/worker.cpuprofile - load it into the Chrome DevTools profiler
+				  (or directly in VSCode) to view a flamegraph.
+
+				",
+				  "info": "",
+				  "out": "Total Upload: xx KiB / gzip: xx KiB
+
+				[31mX [41;31m[[41;97mERROR[41;31m][0m [1mA request to the Cloudflare API (/accounts/some-account-id/workers/scripts/test-name/versions) failed.[0m
+
+				  Error: Script startup exceeded CPU time limit. [code: 10021]
+
+				  If you think this is a bug, please open an issue at:
+				  [4mhttps://github.com/cloudflare/workers-sdk/issues/new/choose[0m
+
+				",
+				  "warn": "",
+				}
+			`);
 		});
 
 		describe("unit tests", () => {
@@ -11286,25 +11598,26 @@ export default{
 					"node_modules/k-mod/module.js": { bytesInOutput: 79 },
 				};
 
-				printOffendingDependencies(deps);
-				expect(std).toMatchInlineSnapshot(`
-			Object {
-			  "debug": "",
-			  "err": "",
-			  "info": "",
-			  "out": "",
-			  "warn": "[33m▲ [43;33m[[43;30mWARNING[43;33m][0m [1mHere are the 5 largest dependencies included in your script:[0m
+				const message = diagnoseScriptSizeError(
+					new ParseError({ text: "too big" }),
+					deps
+				);
+				expect(message).toMatchInlineSnapshot(`
+					"Your Worker failed validation because it exceeded size limits.
 
-			  - node_modules/d-mod/module.js - xx KiB
-			  - node_modules/g-mod/module.js - xx KiB
-			  - node_modules/e-mod/module.js - xx KiB
-			  - node_modules/i-mod/module.js - xx KiB
-			  - node_modules/j-mod/module.js - xx KiB
-			  If these are unnecessary, consider removing them
+					too big
 
-			",
-			}
-		`);
+					Here are the 5 largest dependencies included in your script:
+
+					- node_modules/d-mod/module.js - 2061.72 KiB
+					- node_modules/g-mod/module.js - 77.05 KiB
+					- node_modules/e-mod/module.js - 8.02 KiB
+					- node_modules/i-mod/module.js - 1.95 KiB
+					- node_modules/j-mod/module.js - 0.88 KiB
+
+					If these are unnecessary, consider removing them
+					"
+				`);
 			});
 		});
 	});
@@ -11401,10 +11714,6 @@ export default{
 				modified_on: "",
 			};
 			mockGetQueueByName(queueName, existingQueue);
-			mockPutQueueById(queueId, {
-				queue_name: queueName,
-				settings: {},
-			});
 
 			await runWrangler("deploy index.js");
 			expect(std.out).toMatchInlineSnapshot(`
@@ -11448,12 +11757,7 @@ export default{
 				modified_on: "",
 			};
 			mockGetQueueByName(queueName, existingQueue);
-			mockPutQueueById(queueId, {
-				queue_name: queueName,
-				settings: {
-					delivery_delay: 10,
-				},
-			});
+
 			await runWrangler("deploy index.js");
 			expect(std.out).toMatchInlineSnapshot(`
 				"Total Upload: xx KiB / gzip: xx KiB
@@ -12680,6 +12984,8 @@ export default{
 					logs: {
 						enabled: true,
 						head_sampling_rate: 0.3,
+						destinations: ["cloudflare", "foo"],
+						persist: false,
 						invocation_logs: false,
 					},
 				},
@@ -12693,7 +12999,48 @@ export default{
 					logs: {
 						enabled: true,
 						head_sampling_rate: 0.3,
+						destinations: ["cloudflare", "foo"],
+						persist: false,
 						invocation_logs: false,
+					},
+				},
+			});
+
+			await runWrangler("deploy index.js");
+			expect(std.out).toMatchInlineSnapshot(`
+				"Total Upload: xx KiB / gzip: xx KiB
+				Worker Startup Time: 100 ms
+				Uploaded test-name (TIMINGS)
+				Deployed test-name triggers (TIMINGS)
+				  https://test-name.test-sub-domain.workers.dev
+				Current Version ID: Galaxy-Class"
+			`);
+		});
+
+		it("should allow uploading workers with nested observability logs setting", async () => {
+			writeWranglerConfig({
+				observability: {
+					enabled: true,
+					head_sampling_rate: 0.5,
+					traces: {
+						enabled: true,
+						head_sampling_rate: 0.3,
+						destinations: ["cloudflare", "foo"],
+						persist: false,
+					},
+				},
+			});
+			await fs.promises.writeFile("index.js", `export default {};`);
+			mockSubDomainRequest();
+			mockUploadWorkerRequest({
+				expectedObservability: {
+					enabled: true,
+					head_sampling_rate: 0.5,
+					traces: {
+						enabled: true,
+						head_sampling_rate: 0.3,
+						destinations: ["cloudflare", "foo"],
+						persist: false,
 					},
 				},
 			});
@@ -12987,6 +13334,162 @@ export default{
 			expect(std.warn).toMatchInlineSnapshot(`""`);
 		});
 	});
+
+	describe("config remote differences", () => {
+		it("should present a diff warning to the user when there are differences between the local config (json/jsonc) and the dash config", async () => {
+			writeWorkerSource();
+			mockGetServiceByName("test-name", "production", "dash");
+			writeWranglerConfig(
+				{
+					compatibility_date: "2024-04-24",
+					main: "./index.js",
+					vars: {
+						MY_VAR: 123,
+					},
+					observability: {
+						enabled: true,
+					},
+				},
+				"./wrangler.json"
+			);
+			mockSubDomainRequest();
+			mockUploadWorkerRequest();
+			mockGetServiceBindings("test-name", [
+				{ name: "MY_VAR", text: "abc", type: "plain_text" },
+			]);
+			mockGetServiceRoutes("test-name", []);
+			mockGetServiceCustomDomainRecords([]);
+			mockGetServiceSubDomainData("test-name", {
+				enabled: true,
+				previews_enabled: false,
+			});
+			mockGetServiceSchedules("test-name", { schedules: [] });
+			mockGetServiceMetadata("test-name", {
+				created_on: "2025-08-07T09:34:47.846308Z",
+				modified_on: "2025-08-08T10:48:12.688997Z",
+				script: {
+					created_on: "2025-08-07T09:34:47.846308Z",
+					modified_on: "2025-08-08T10:48:12.688997Z",
+					id: "silent-firefly-dbe3",
+					observability: { enabled: true, head_sampling_rate: 1 },
+					compatibility_date: "2024-04-24",
+				},
+			} as unknown as ServiceMetadataRes["default_environment"]);
+
+			mockConfirm({
+				text: "Would you like to continue?",
+				result: true,
+			});
+
+			await runWrangler("deploy --x-remote-diff-check");
+
+			expect(normalizeLogWithConfigDiff(std.warn)).toMatchInlineSnapshot(`
+				"[33m▲ [43;33m[[43;30mWARNING[43;33m][0m [1mThe local configuration being used (generated from your local configuration file) differs from the remote configuration of your Worker set via the Cloudflare Dashboard:[0m
+
+				      \\"workers_dev\\": true,
+				      \\"preview_urls\\": false,
+				      \\"vars\\": {
+				  -     \\"MY_VAR\\": \\"abc\\"
+				  +     \\"MY_VAR\\": 123
+				      },
+				      \\"define\\": {},
+				      \\"durable_objects\\": {
+
+				  Deploying the Worker will override the remote configuration with your local one.
+
+				"
+			`);
+		});
+
+		it("should present a diff warning to the user when there are differences between the local config (toml) and the dash config", async () => {
+			writeWorkerSource();
+			mockGetServiceByName("test-name", "production", "dash");
+			writeWranglerConfig(
+				{
+					compatibility_date: "2024-04-24",
+					main: "./index.js",
+					vars: {
+						MY_VAR: "this is a toml file",
+					},
+					observability: {
+						enabled: true,
+					},
+				},
+				"./wrangler.toml"
+			);
+			mockSubDomainRequest();
+			mockUploadWorkerRequest();
+			mockGetServiceBindings("test-name", [
+				{ name: "MY_VAR", text: "abc", type: "plain_text" },
+			]);
+			mockGetServiceRoutes("test-name", []);
+			mockGetServiceCustomDomainRecords([]);
+			mockGetServiceSubDomainData("test-name", {
+				enabled: true,
+				previews_enabled: false,
+			});
+			mockGetServiceSchedules("test-name", { schedules: [] });
+			mockGetServiceMetadata("test-name", {
+				created_on: "2025-08-07T09:34:47.846308Z",
+				modified_on: "2025-08-08T10:48:12.688997Z",
+				script: {
+					created_on: "2025-08-07T09:34:47.846308Z",
+					modified_on: "2025-08-08T10:48:12.688997Z",
+					id: "silent-firefly-dbe3",
+					observability: { enabled: true, head_sampling_rate: 1 },
+					compatibility_date: "2024-04-24",
+				},
+			} as unknown as ServiceMetadataRes["default_environment"]);
+
+			mockConfirm({
+				text: "Would you like to continue?",
+				result: true,
+			});
+
+			await runWrangler("deploy --x-remote-diff-check");
+
+			// Note: we display the toml config diff in json format since code-wise we'd have to convert the rawConfig to toml
+			//       to be able to show toml content/diffs, that combined with the fact that json(c) config files are the
+			//       recommended ones moving forward makes this small shortcoming of the config diffing acceptable
+			expect(normalizeLogWithConfigDiff(std.warn)).toMatchInlineSnapshot(`
+				"[33m▲ [43;33m[[43;30mWARNING[43;33m][0m [1mThe local configuration being used (generated from your local configuration file) differs from the remote configuration of your Worker set via the Cloudflare Dashboard:[0m
+
+				      \\"workers_dev\\": true,
+				      \\"preview_urls\\": false,
+				      \\"vars\\": {
+				  -     \\"MY_VAR\\": \\"abc\\"
+				  +     \\"MY_VAR\\": \\"this is a toml file\\"
+				      },
+				      \\"define\\": {},
+				      \\"durable_objects\\": {
+
+				  Deploying the Worker will override the remote configuration with your local one.
+
+				"
+			`);
+		});
+
+		function normalizeLogWithConfigDiff(log: string): string {
+			// If the path is long the log could be wrapped so we need to remove the potential wrapping
+			let normalizedLog = log.replace(/"main":\s*"/, '"main": "');
+
+			if (process.platform === "win32") {
+				// On windows the snapshot paths incorrectly use double slashes, such as:
+				//  `\"main\": \"C://Users//RUNNER~1//AppData//Local//Temp//wrangler-testse63LuJ//index.js\",
+				// so in the `main` field we replace all possible occurrences of `//` with just `\\`
+				// (so that the path normalization of `normalizeString` can appropriately work)
+				normalizedLog = normalizedLog.replace(
+					/"main": "(.*?)"/,
+					(_, mainPath: string) =>
+						`"main": "${mainPath.replaceAll("//", "\\")}"`
+				);
+			}
+
+			normalizedLog = normalizeString(normalizedLog);
+
+			return normalizedLog;
+		}
+	});
 });
 
 /** Write mock assets to the file system so they can be uploaded. */
@@ -13100,51 +13603,6 @@ function mockUnauthorizedPublishRoutesRequest({
 			},
 			{ once: true }
 		)
-	);
-}
-
-function mockGetZones(
-	domain: string,
-	zones: { id: string }[] = [],
-	accountId = "some-account-id"
-) {
-	msw.use(
-		http.get("*/zones", ({ request }) => {
-			const url = new URL(request.url);
-
-			expect([...url.searchParams.entries()]).toEqual([
-				["name", domain],
-				["account.id", accountId],
-			]);
-
-			return HttpResponse.json(
-				{
-					success: true,
-					errors: [],
-					messages: [],
-					result: zones,
-				},
-				{ status: 200 }
-			);
-		})
-	);
-}
-
-function mockGetWorkerRoutes(zoneId: string) {
-	msw.use(
-		http.get("*/zones/:zoneId/workers/routes", ({ params }) => {
-			expect(params.zoneId).toEqual(zoneId);
-
-			return HttpResponse.json(
-				{
-					success: true,
-					errors: [],
-					messages: [],
-					result: [],
-				},
-				{ status: 200 }
-			);
-		})
 	);
 }
 
@@ -13494,7 +13952,9 @@ function mockServiceScriptData(options: {
 							success: true,
 							errors: [],
 							messages: [],
-							result: { default_environment: { script } },
+							result: {
+								default_environment: { environment: "production", script },
+							},
 						});
 					},
 					{ once: true }
@@ -13528,7 +13988,11 @@ function mockGetQueueByName(queueName: string, queue: QueueResponse | null) {
 	return requests;
 }
 
-function mockGetServiceByName(serviceName: string, defaultEnvironment: string) {
+function mockGetServiceByName(
+	serviceName: string,
+	defaultEnvironment: string,
+	lastDeploymentFrom: "wrangler" | "dash" = "wrangler"
+) {
 	const requests = { count: 0 };
 	const resource = `*/accounts/:accountId/workers/services/:serviceName`;
 	msw.use(
@@ -13546,7 +14010,7 @@ function mockGetServiceByName(serviceName: string, defaultEnvironment: string) {
 					default_environment: {
 						environment: defaultEnvironment,
 						script: {
-							last_deployed_from: "wrangler",
+							last_deployed_from: lastDeploymentFrom,
 						},
 					},
 				},
@@ -13604,37 +14068,6 @@ function mockPostConsumerById(
 				});
 			},
 			{ once: true }
-		)
-	);
-	return requests;
-}
-
-function mockPutQueueById(
-	expectedQueueId: string,
-	expectedBody: PostQueueBody
-) {
-	const requests = { count: 0 };
-	msw.use(
-		http.put(
-			`*/accounts/:accountId/queues/:queueId`,
-			async ({ request, params }) => {
-				const body = await request.json();
-				expect(params.queueId).toEqual(expectedQueueId);
-				expect(params.accountId).toEqual("some-account-id");
-				expect(body).toEqual(expectedBody);
-				requests.count += 1;
-				return HttpResponse.json({
-					success: true,
-					errors: [],
-					messages: [],
-					result: {
-						queue: expectedBody.queue_name,
-						settings: {
-							delivery_delay: expectedBody.settings?.delivery_delay,
-						},
-					},
-				});
-			}
 		)
 	);
 	return requests;
@@ -13750,6 +14183,152 @@ const mockAssetUploadRequest = async (
 		)
 	);
 };
+
+function mockGetServiceBindings(
+	serviceName: string,
+	bindings: WorkerMetadataBinding[]
+) {
+	const resource = `*/accounts/:accountId/workers/services/:serviceName/environments/:serviceEnvironment/bindings`;
+	msw.use(
+		http.get(resource, async ({ params }) => {
+			expect(params.accountId).toEqual("some-account-id");
+			expect(params.serviceName).toEqual(serviceName);
+
+			return HttpResponse.json({
+				success: true,
+				errors: [],
+				messages: [],
+				result: bindings,
+			});
+		})
+	);
+}
+
+function mockGetServiceRoutes(
+	serviceName: string,
+	routes: {
+		id: string;
+		pattern: string;
+		zone_name: string;
+		script: string;
+	}[]
+) {
+	const resource = `*/accounts/:accountId/workers/services/:serviceName/environments/:serviceEnvironment/routes`;
+	msw.use(
+		http.get(resource, async ({ params }) => {
+			expect(params.accountId).toEqual("some-account-id");
+			expect(params.serviceName).toEqual(serviceName);
+
+			return HttpResponse.json({
+				success: true,
+				errors: [],
+				messages: [],
+				result: routes,
+			});
+		})
+	);
+}
+
+function mockGetServiceCustomDomainRecords(
+	customDomanRecords: {
+		id: string;
+		zone_id: string;
+		zone_name: string;
+		hostname: string;
+		service: string;
+		environment: string;
+		cert_id: string;
+	}[]
+) {
+	msw.use(
+		http.get(`*/accounts/:accountId/workers/domains/records`, ({ params }) => {
+			expect(params.accountId).toEqual("some-account-id");
+
+			return HttpResponse.json({
+				success: true,
+				errors: [],
+				messages: [],
+				result: customDomanRecords,
+			});
+		})
+	);
+}
+
+function mockGetServiceSubDomainData(
+	serviceName: string,
+	data: {
+		enabled: boolean;
+		previews_enabled: boolean;
+	}
+) {
+	msw.use(
+		http.get(
+			`*/accounts/:accountId/workers/services/:workerName/environments/:serviceEnvironment/subdomain`,
+			({ params }) => {
+				expect(params.accountId).toEqual("some-account-id");
+				expect(params.workerName).toEqual(serviceName);
+
+				return HttpResponse.json({
+					success: true,
+					errors: [],
+					messages: [],
+					result: data,
+				});
+			}
+		)
+	);
+}
+
+function mockGetServiceSchedules(
+	serviceName: string,
+	data: {
+		schedules: {
+			cron: string;
+			created_on: Date;
+			modified_on: Date;
+		}[];
+	}
+) {
+	msw.use(
+		http.get(
+			`*/accounts/:accountId/workers/scripts/:workerName/schedules`,
+			({ params }) => {
+				expect(params.accountId).toEqual("some-account-id");
+				expect(params.workerName).toEqual(serviceName);
+
+				return HttpResponse.json({
+					success: true,
+					errors: [],
+					messages: [],
+					result: data,
+				});
+			}
+		)
+	);
+}
+
+function mockGetServiceMetadata(
+	serviceName: string,
+	data: ServiceMetadataRes["default_environment"]
+) {
+	msw.use(
+		http.get(
+			`*/accounts/:accountId/workers/services/:workerName/environments/:serviceEnvironment`,
+			({ params }) => {
+				expect(params.accountId).toEqual("some-account-id");
+				expect(params.workerName).toEqual(serviceName);
+
+				return HttpResponse.json({
+					success: true,
+					errors: [],
+					messages: [],
+					result: data,
+				});
+			}
+		)
+	);
+}
+
 expect.extend({
 	async toBeAFileWhichMatches(
 		received: File,
